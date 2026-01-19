@@ -1,0 +1,270 @@
+<?php
+
+use Slim\Http\Request;
+use Slim\Http\Response;
+
+// Routes
+require  '/var/www/synpat/synpat/AllApi/src/DataController.php';
+/*$app->get('/[{name}]', function (Request $request, Response $response, array $args) {
+    // Sample log message
+    $this->logger->info("Slim-Skeleton '/' route");
+
+    // Render index view
+    return $this->renderer->render($response, 'index.phtml', $args);
+});*/
+$app->group('/v1', function () use ($app) {
+	/* For Authentication 
+	   path:/v1/auth
+	   return Valid Token Or Bad Inputs
+	*/
+	$app->post('/auth',  function($req, $resp, $args) use ($app){return DataController::auth($app, $req, $resp, $args);});
+	
+	/*
+		For Docket Details
+		path: /v1/data/{docket_number}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	
+	$app->get('/docket_details/{docket_number}', function($req, $resp, $args) use ($app){return DataController::docket_data($app, $req, $resp, $args);});
+	
+	/*
+		For Docket Scope
+		path: /v1/docket_scope/{docket_number}/{values}
+		values = all or patent number
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	
+	$app->get('/docket_scope/{docket_number}/{values}', function($req, $resp, $args) use ($app){return DataController::docket_scope($app, $req, $resp, $args);});
+	
+	/*
+		For Docket Claim Illustration file
+		path: /v1/docket_claim/{docket_number}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	
+	$app->get('/docket_claim_files/{docket_number}', function($req, $resp, $args) use ($app){return DataController::docket_claim($app, $req, $resp, $args);});
+	/*
+		For Docket Invention data
+		path: /v1/docket_invention/{docket_number}/{value}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->get('/docket_invention/{docket_number}/{value}', function($req, $resp, $args) use ($app){return DataController::docket_invention($app, $req, $resp, $args);});
+	
+	
+	/*
+		For Docket Comparables list of agreements
+		path: /v1/docket_comparables/{docket_number}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->get('/docket_comparables/{docket_number}', function($req, $resp, $args) use ($app){return DataController::docket_comparables($app, $req, $resp, $args);});
+	
+	/*
+		For Docket Royalties list of agreements
+		path: /v1/docket_royalties/{docket_number}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->get('/docket_royalties/{docket_number}', function($req, $resp, $args) use ($app){return DataController::docket_royalties($app, $req, $resp, $args);});
+	
+	/*
+		For Docket Citation company logos
+		path: /v1/docket_clogos/{docket_number}
+		post: type and list
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->post('/docket_companies_logos/{docket_number}', function($req, $resp, $args) use ($app){return DataController::docket_clogos($app, $req, $resp, $args);});
+	
+	/*
+		For Docket Citation 
+		path: /v1/docket_citations/{docket_number}
+		post: type and list
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->post('/docket_citations/{docket_number}', function($req, $resp, $args) use ($app){return DataController::docket_citations($app, $req, $resp, $args);});
+	
+	/*
+		For Docket Seller 
+		path: /v1/docket_seller/{docket_number}/{value}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->get('/docket_seller/{docket_number}/{value}', function($req, $resp, $args) use ($app){return DataController::docket_seller($app, $req, $resp, $args);});
+	
+	
+	/*
+		For Docket PDF files
+		path: /v1/docket_pdf/{docket_number}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->get('/docket_pdf_files/{docket_number}', function($req, $resp, $args) use ($app){return DataController::docket_pdf($app, $req, $resp, $args);});
+	
+	/*
+		For Docket Validity 
+		path: /v1/docket_validity/{docket_number}/{value}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->get('/docket_validity/{docket_number}/{value}', function($req, $resp, $args) use ($app){return DataController::docket_validity($app, $req, $resp, $args);});
+	
+	/*
+		For Docket Companies 
+		path: /v1/docket_companies/{docket_number}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->get('/docket_companies/{docket_number}', function($req, $resp, $args) use ($app){return DataController::docket_companies($app, $req, $resp, $args);});
+	
+	
+	/*
+		For Docket Patents 
+		path: /v1/docket_patents/{docket_number}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->get('/docket_patents/{docket_number}', function($req, $resp, $args) use ($app){return DataController::docket_patents($app, $req, $resp, $args);});
+	
+	/*
+		For Child Category list
+		path: /v1/category/{parent_category}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->get('/category/{parent_category}', function($req, $resp, $args) use ($app){return DataController::categories($app, $req, $resp, $args);});
+	
+	/*
+		For Main Category list
+		path: /v1/category
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->get('/category', function($req, $resp, $args) use ($app){return DataController::main_categories($app, $req, $resp, $args);});
+	
+	/*
+		For Portfolio list
+		path: /v1/portfolio/{category}/{invitation}
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	
+	/*
+		For Login
+		path: /v1/login
+		post: email and password
+		return Auth Token
+	*/
+	$app->post('/login', function($req, $resp, $args) use ($app){return DataController::login($app, $req, $resp, $args);});
+	
+	/*
+		For Login
+		path: /v1/portfolio/{category}/{invitation}
+		parameter category and invitation number
+		return list of portfolios under given category or show portfolio according to inviation
+	*/
+	
+	$app->get('/portfolio/{category}/{invitation}', function($req, $resp, $args) use ($app){return DataController::portfolio_list($app, $req, $resp, $args);});
+	
+	/*
+		For Demo Portfolio
+		path: /v1/demo_portfolio
+		return list of demo portfolios
+	*/
+	
+	$app->get('/demo_portfolio', function($req, $resp, $args) use ($app){return DataController::demo_portfolio_list($app, $req, $resp, $args);});
+	
+	/*
+		For Deal Flow
+		path: /v1/user_deal_flow
+		parameter: Token
+		return list of deals flow
+	*/
+	
+	$app->get('/customer_deal_flow', function($req, $resp, $args) use ($app){return DataController::user_deal_flow($app, $req, $resp, $args);});
+	
+	/*
+		For Customer Transaction
+		path: /v1/customer_transactions
+		parameter: Token
+		return list of licenses
+	*/
+	
+	$app->get('/customer_transactions', function($req, $resp, $args) use ($app){return DataController::user_transaction($app, $req, $resp, $args);});
+	
+	/*
+		For Porfolio Info
+		path: /v1/portfolio_info/{portfolio_number}
+		parameter: Token
+		return porfolio detail
+	*/
+	
+	$app->get('/portfolio_info/{portfolio_number}', function($req, $resp, $args) use ($app){return DataController::portfolio_info($app, $req, $resp, $args);});
+	
+	/*
+		For Customer Wishlist
+		path: /v1/customer_wishlist
+		parameter: Token
+		return list of wishlist
+	*/
+	
+	$app->get('/customer_wishlist', function($req, $resp, $args) use ($app){return DataController::user_wishlist($app, $req, $resp, $args);});
+	
+	/*
+		For Customer Add Wishlisdt
+		path: /v1/add_customer_wishlist
+		parameter: Token
+		return list of preferences
+	*/
+	
+	$app->post('/add_customer_wishlist', function($req, $resp, $args) use ($app){return DataController::add_customer_wishlist($app, $req, $resp, $args);});
+	
+	/*
+		For Customer Preferences
+		path: /v1/customer_preferences
+		parameter: Token
+		return list of preferences
+	*/
+	
+	$app->get('/customer_preferences', function($req, $resp, $args) use ($app){return DataController::user_preferences($app, $req, $resp, $args);});
+	
+	/*
+		For Company Info
+		path: /v1/company_info
+		parameter: Token
+		return company information
+	*/
+	
+	$app->get('/company_info', function($req, $resp, $args) use ($app){return DataController::company_info($app, $req, $resp, $args);});
+	
+	/*
+		For Company Users list
+		path: /v1/company_users_list
+		parameter: Token
+		return company users list
+	*/
+	
+	$app->get('/company_users_list', function($req, $resp, $args) use ($app){return DataController::users_list($app, $req, $resp, $args);});
+	
+	/*
+		For Customer users list
+		path: /v1/customer_users
+		parameter: Token
+		return customer users list
+	*/
+	
+	$app->get('/customer_users_list', function($req, $resp, $args) use ($app){return DataController::users_list($app, $req, $resp, $args);});
+	
+	/*
+		For Search Company list
+		path: /v1/search_companies
+		parameter: Valid Token
+		return JSON docket data or empty
+	*/
+	$app->post('/search_companies', function($req, $resp, $args) use ($app){return DataController::search_companies($app, $req, $resp, $args);});
+});

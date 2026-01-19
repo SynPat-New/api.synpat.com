@@ -1,0 +1,4844 @@
+<?php 
+use \Firebase\JWT\JWT;
+use Slim\Http\Response;
+class DataController{
+	private $backEndUrl = "https://backyard.synpat.com/";
+	
+	public function getBackendUrl(){
+		return DataController::backEndUrl;
+	}
+	private function getResponse(){
+        $response = new Response();
+        $response->headers->set('Content-Type', 'application/json; charset=utf-8');
+        $response->setBody(json_encode(array('apple' => 'green'), JSON_UNESCAPED_UNICODE));
+        return $response;
+    }
+	
+	private function insertData($tableName,$data){
+		$fieldNames = array();
+		$questMark = array();
+		$dataValues = array();
+		$insertID = 0;
+		if(count($data)>0){
+			foreach($data as $key=>$value){
+				array_push($fieldNames,$key);
+				array_push($questMark,"?");
+				array_push($dataValues,$value);
+			}
+		}
+		try {
+			$queryStmt = "INSERT INTO ".$tableName." ( ".implode(',',$fieldNames)." ) VALUES ( ".implode(',',$questMark)." ) ";
+			$stmt= $this->db->prepare($queryStmt);
+			$stmt->execute($dataValues);
+			$insertID = $this->db->lastInsertId();
+		}catch (Exception $e){
+			/*Error in query*/
+			$this->logger->addInfo($e->getMessage());
+		}
+		return $insertID;
+	}
+	
+	private function updateData($tableName,$where,$data){
+		$fieldNames = array();
+		$fieldWhereNames = array();
+		$dataValues = array();
+		$updateID = 0;
+		if(count($data)>0){
+			foreach($data as $key=>$value){
+				array_push($fieldNames,$key.="=?");
+				array_push($dataValues,$value);
+			}
+		}
+		if(count($where)>0){
+			foreach($where as $key=>$value){
+				array_push($fieldWhereNames,$key.="=?");
+				array_push($dataValues,$value);
+			}
+		}
+		if(count($fieldNames)>0 && count($fieldWhereNames)>0  && count($dataValues)>0){
+			try {
+				$queryStmt = "UPDATE ".$tableName." SET ".implode(',',$fieldNames)." WHERE   ".implode(' AND ',$fieldWhereNames)."  ";
+				$stmt= $this->db->prepare($queryStmt);
+				$stmt->execute($dataValues);
+				$updateID = $stmt->rowCount();
+			}catch (Exception $e){
+				/*Error in query*/
+				$this->logger->addInfo($e->getMessage());
+			}
+		}
+		return $insertID;
+	}
+	
+	public function auth($app,$req,$resp, $args = [])  {
+		/*Get Post data*/
+		$data = $req->getParsedBody();
+		$apiKey = $data['key'];
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		try {
+			$stmt = $this->db->prepare("SELECT id,secret_key FROM api_users WHERE secret_key=?");
+			$stmt->execute([$apiKey]);
+			$num_rows = $stmt->rowCount();
+			if($num_rows==1){
+				/*	Authenticated
+					Generate Token
+				*/
+				$queryData = $stmt->fetch();
+				$payload = array(
+					"iss"     => "https://synpat.com/store",
+					"iat"     => time(),
+					"exp"     => time() + (3600 * 24 * 15),
+					"context" => [
+						"user" => [
+							"user_login" => $queryData->secret_key,
+							"user_id"    => $queryData->id,
+							"crm_alias"    => 'docket-api'
+						]
+					]
+				);	
+				$key = $this->get('settings')['docket-key'];
+				$jwt = JWT::encode($payload, $key);
+				$insertID = DataController::insertData('docket_tokens',array('user_id'=>$queryData->id,'token'=>$jwt,'date_created'=>$payload['iat'],'date_expiration'=>$payload['exp']));
+				if($insertID>0){
+					$returnData['status'] = 200;
+					$returnData['data'] = ["token" => $jwt];
+					$returnData['message'] = "Authenticated!";
+				} else {
+					$returnData['status'] = 500;
+					$returnData['error_code'] = "100";
+					$returnData['message'] = "Internal server error";
+				}				
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "200";
+				$returnData['message'] = "Invalid key";
+			}			
+		} catch (PDOException $e) {
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+			$this->logger->addInfo($e->getMessage());
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+    }
+	
+	public function docket_data($app,$req,$resp,$args = [])  {
+		/**print_r($req->getHeaders());*/
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+        $headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			if($docketNumber>0){
+				$stmt = $this->db->prepare("SELECT purchase_license,purchase_buy,strategic_license_agreement,program_policies_file,purchase_file,active_button,asking_price,expiration_date,portfolio_text,portfolio_accordion_complete,current_requesting_companies,person_email,person_picture,person_phone,person_email,file_left,file_middle,file_right,file_four,file_five,file_six,file_seven,file_eight,file_nine,file_ten,file_eleven,file_twelve,file_thirteen,file_fourteen,file_fiveteen,file_sixteen,syndication_tab,price_tab,simulator_text,introduction,document_text,due_diligence_tab,claim_chart_tab,impact_tab,serial_number as docket_number, id as docketID FROM licenses WHERE license_number=? LIMIT 1");
+				$stmt->execute([$docketNumber]);
+				$num_rows = $stmt->rowCount();
+				if($num_rows==1){
+					$docketData = $stmt->fetch();
+					$commitmentData = array();
+					$jurisdictionData = array();
+					$technologiesData = array();
+					$assetsData = array();
+					/*Commitment Chart Data*/
+					$commitmentStmt = $this->db->prepare("SELECT amount,commitment_date,ar FROM commitments WHERE license_id=?");
+					$commitmentStmt->execute([$docketData->docketID]);
+					if($commitmentStmt->rowCount()>0){
+						while($row = $commitmentStmt->fetch()){
+							array_push($commitmentData ,$row);
+						}
+					}
+					/*Jurisdiction Chart Data*/
+					$jurisdictionStmt = $this->db->prepare("SELECT country,applications,patents FROM chart_lefts WHERE license_id=?");
+					$jurisdictionStmt->execute([$docketData->docketID]);
+					if($jurisdictionStmt->rowCount()>0){
+						while($row = $jurisdictionStmt->fetch()){
+							array_push($jurisdictionData,$row);
+						}
+					}
+					/*Technologies Chart Data*/
+					$technologiesStmt = $this->db->prepare("SELECT technologies,data,tooltip FROM chart_middles WHERE license_id=?");
+					$technologiesStmt->execute([$docketData->docketID]);
+					if($technologiesStmt->rowCount()>0){
+						while($row = $technologiesStmt->fetch()){
+							array_push($technologiesData,$row);
+						}
+					}
+					/*Assets/Live Chart Data*/
+					$assetsStmt = $this->db->prepare("SELECT year,data FROM chart_rights WHERE license_id=?");
+					$assetsStmt->execute([$docketData->docketID]);
+					if($assetsStmt->rowCount()>0){
+						while($row = $assetsStmt->fetch()){
+							array_push($assetsData,$row);
+						}
+					}
+					unset($docketData->docketID);
+					$docketData->commitments = $commitmentData;
+					$docketData->jurisdiction = $jurisdictionData;
+					$docketData->technologies = $technologiesData;
+					$docketData->assets = $assetsData;
+					$returnData['status'] = 200;
+					$returnData['data'] = $docketData;
+				} else {
+					$returnData['status'] = 404;
+					$returnData['data'] = array();
+					$returnData['error_code'] = 300;
+					$returnData['message'] = "Invalid docket number";
+				}
+			} else {
+				$returnData['status'] = 500;
+				$returnData['data'] = array();
+				$returnData['error_code'] = 600;
+				$returnData['message'] = "Invalid docket number";
+			}
+		}catch(Exception $e){
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+			$this->logger->addInfo($e->getMessage());
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+    }
+	/*
+		Scope
+		return Patent simple family data
+	*/
+	public function docket_scope($app,$req,$resp,$args = [])  {
+		/*
+			Checking request with All or Patent number
+		*/
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+        $headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		
+		$docketNumber = $req->getAttribute('docket_number');
+		$patentNumber = $req->getAttribute('values');
+		$family_data = array('number'=>'','list'=>array(),'country'=>array());
+		$calledNumber = $patentNumber;
+		if($patentNumber=="all"){
+			/*Get family list for all patents*/
+			$queryLead = "SELECT id FROM litigations WHERE serial_number=?";
+			$leadStmt = $this->db->prepare($queryLead);
+			$leadStmt->execute([$docketNumber]);
+			if($leadStmt->rowCount()>0){
+				$rowData = $leadStmt->fetch();
+				$queryPatents = "SELECT distinct(lp.patent_number) as patent_number FROM lead_patent as lp WHERE lp.lead_id=?";
+				$patentsStmt = $this->db->prepare($queryPatents);
+				$patentsStmt->execute([$rowData->id]);
+				//$patentsStmt->debugDumpParams();
+				if($patentsStmt->rowCount()>0){
+					$family = array();
+					while($rowPatent = $patentsStmt->fetch()){
+						$patentNumber = $rowPatent->patent_number;
+						$first2Letter = substr($patentNumber,0,2);
+						$newNumber = "";
+						if(!is_numeric($first2Letter)){
+							$newNumber = substr($patentNumber,2);
+							$last2Code = substr($newNumber,-2);
+							$last1Code = substr($newNumber,-1);
+							if(!is_numeric($last1Code)){
+								$newNumber = substr($newNumber,0,-1);
+							} else if(!is_numeric($last2Code)){
+								$newNumber = substr($newNumber,0,-2);
+							}
+						}
+						if($newNumber==""){
+							$newNumber = $patentNumber;
+						}
+						$queryIllustration = "SELECT id,family_id FROM lead_patent_family_member as fm WHERE fm.publication_number LIKE ? order by id DESC LIMIT 1";
+						$illustrationStmt = $this->db->prepare($queryIllustration);
+						$illustrationStmt->execute(['%'.$newNumber.'%']);
+						if($illustrationStmt->rowCount()>0){
+							$rowFamily = $illustrationStmt->fetch();
+							$family[] = $rowFamily->family_id;
+						}
+					}
+					if(count($family)>0){
+						$familyImplode = str_repeat ('?, ',  count ($family) - 1) . '?';
+						$querySimpleFamily = "SELECT fpr.*,pfm.publication_country,publication_kind,pfm.application_number,pfm.application_date,pfm.claims,pfm.abstracts,pfm.images,pfm.publication_date,pfm.application_country,pfm.application_kind,pfm.title,pfm.priority_date,pfm.applicants,pfm.assignee,pfm.inventors,pfm.assigments FROM lead_patent_family_relation  as fpr LEFT JOIN lead_patent_family_member as pfm ON pfm.publication_number = fpr.patent_id WHERE fpr.family_id IN ($familyImplode) ORDER BY fpr.filling_date ASC, fpr.id ASC";
+						$simpleFamilyStmt = $this->db->prepare($querySimpleFamily);
+						$simpleFamilyStmt->execute($family);
+						if($simpleFamilyStmt->rowCount()>0){
+							while($rowF = $simpleFamilyStmt->fetch()){
+								$family_data['list'][] = $rowF;
+							}
+						}
+						for($i=0;$i<count($family_data['list']);$i++){
+							$relation = array();
+							$patentNumber = $family_data['list'][$i]->patent_id;
+							$status = "";
+							if(substr(strtoupper($family_data['list'][$i]->publication_kind),0,1)=="B" && strtolower(strtoupper($family_data['list'][$i]->publication_country))=='us'){
+								$applicationNumber = $family_data['list'][$i]->application_number;
+								$queryRelation = "SELECT distinct(relation_number) as relation_number,id, patent_app_number,relation_type,filed_date FROM lead_patent_family_child WHERE child = ? AND patent_app_number=?";
+								$relationStmt = $this->db->prepare($queryRelation);
+								$relationStmt->execute([1,$applicationNumber]);
+								if($relationStmt->rowCount()>0){
+									while($row = $relationStmt->fetch()){
+										$relation[] = $row;
+									}
+									$queryStatus = "SELECT status FROM patent_illustration_detail WHERE patent_number=? LIMIT 1";
+									$statusStmt = $this->db->prepare($queryStatus);
+									$statusStmt->execute([$patentNumber]);
+									if($statusStmt->rowCount()>0){
+										$statusRow = $statusStmt->fetch();
+										$status= $statusRow->status;
+									}
+								}
+							}
+							$family_data['list'][$i]->status = $status;
+							$family_data['list'][$i]->relation = $relation;
+						}
+					}
+				}
+			}			
+		} else if($patentNumber!="") {
+			/*Get family list from particular patent*/
+			$family_data['number'] = $patentNumber;
+			if(strlen($patentNumber)>7){		
+				$countryCode = substr($patentNumber,0,2);
+				if(strtolower(strtoupper($countryCode))=="us"){
+					if(strlen($patentNumber)==11){
+						$patentNumber = substr($patentNumber,0,9);
+					}
+				}
+			}
+			$first2Letter = substr($patentNumber,0,2);
+			$newNumber = "";
+			if(!is_numeric($first2Letter)){
+				$newNumber = substr($patentNumber,2);
+				$last2Code = substr($newNumber,-2);
+				$last1Code = substr($newNumber,-1);
+				if(!is_numeric($last1Code)){
+					$newNumber = substr($newNumber,0,-1);
+				} else if(!is_numeric($last2Code)){
+					$newNumber = substr($newNumber,0,-2);
+				}
+			}
+			if($newNumber==""){
+				$newNumber = $patentNumber;
+			}
+			$queryIllustration = "SELECT id,family_id FROM lead_patent_family_member as fm WHERE fm.publication_number LIKE ? LIMIT 1";
+			$illustrationStmt = $this->db->prepare($queryIllustration);
+			$illustrationStmt->execute(['%$newNumber%']);
+			$family_data['list'] = array();
+			if($illustrationStmt->rowCount()>0){
+				$rowData = $illustrationStmt->fetch();
+				$querySimpleFamily = "SELECT fpr.*,pfm.publication_country,publication_kind,pfm.application_number,pfm.application_date,pfm.claims,pfm.abstracts,pfm.images,pfm.publication_date,pfm.application_country,pfm.application_kind,pfm.title,pfm.priority_date,pfm.applicants,pfm.assignee,pfm.inventors,pfm.assigments FROM lead_patent_family_relation  as fpr LEFT JOIN lead_patent_family_member as pfm ON pfm.publication_number = fpr.patent_id WHERE fpr.family_id = ? ORDER BY fpr.filling_date ASC, fpr.id ASC";
+				$simpleFamilyStmt = $this->db->prepare($querySimpleFamily);
+				$simpleFamilyStmt->execute([$rowData->family_id]);
+				if($simpleFamilyStmt->rowCount()>0){
+					while($row = $simpleFamilyStmt->fetch()){
+						$family_data['list'][] = $row;
+					}
+					for($i=0;$i<count($family_data['list']);$i++){
+						$relation = array();
+						$patentNumber = $family_data['list'][$i]->patent_id;
+						$status = "";
+						if(substr(strtoupper($family_data['list'][$i]->publication_kind),0,1)=="B" && strtolower(strtoupper($family_data['list'][$i]->publication_country))=='us'){
+							$applicationNumber = $family_data['list'][$i]->application_number;
+							$queryRelation = "SELECT distinct(relation_number) as relation_number,id, patent_app_number,relation_type,filed_date FROM lead_patent_family_child WHERE child = ?  AND patent_app_number=?";
+							$relationStmt = $this->db->prepare($queryRelation);
+							$relationStmt->execute([1,$applicationNumber]);
+							if($relationStmt->rowCount()>0){
+								while($row = $relationStmt->fetch()){
+									$relation[] = $row;
+								}
+								$queryStatus = "SELECT status FROM patent_illustration_detail WHERE patent_number=? LIMIT 1";
+								$statusStmt = $this->db->prepare($queryStatus);
+								$statusStmt->execute([$patentNumber]);
+								if($statusStmt->rowCount()>0){
+									$statusRow = $statusStmt->fetch();
+									$status= $statusRow->status;
+								}
+							}
+						}
+						$family_data['list'][$i]->status = $status;
+						$family_data['list'][$i]->relation = $relation;
+					}
+				}
+			}
+		}
+		$jsonRelations = array();
+		$jsonRectangles = array();
+		$childListIDs = array();
+		$childList = array();
+		$parentList = array();
+		$verticals = array();
+		$applicationListIDS = array();
+		$nonVerticalsEntries = array();
+		$nonVerticalsExits = array();
+		$childAppNumber = array();
+		$searchPatent = $calledNumber;
+		$svgWidth = 500;
+		$svgHeight = 500;
+		$height = 85;
+		$width = 200;
+		$fS = false;
+		$countries = array();
+		if(count($family_data['country'])>0){
+			foreach($family_data['country'] as $country){
+				$countries[] = strtolower(strtoupper($country->publication_country));
+			}
+		}
+		if(count($family_data['list'])>0){
+			$cpCount = 0;
+			$chCount = 1;
+			for($i=0;$i<count($family_data['list']);$i++){
+				$family = $family_data['list'][$i];
+				$patentNumber = $family->patent_id;
+				$countryCode = strtoupper($family->publication_country);
+				$publicationKind = strtoupper($family->publication_kind);
+				$label = $countryCode.$patentNumber;
+				$label = $label.$publicationKind;
+				$search = false;
+				if($label!="" && $label==strtoupper($searchPatent)){
+					$search = true;
+				}
+				$family_data['list'][$i]->search = $search;
+				$family_data['list'][$i]->label = $label;
+				$family_data['list'][$i]->application_org_number = $family->application_number;
+				$family_data['list'][$i]->type = "CIP";
+				$outside = false;
+				if(strtolower(strtoupper($countryCode))!="us"){
+					$outside = true;
+				}
+				$family_data['list'][$i]->country = strtolower(strtoupper($countryCode));
+				$family_data['list'][$i]->outside = $outside;
+				$family_data['list'][$i]->type = "CIP";
+				$same = false;
+				$fillingDate = $family->filling_date;
+				$previousFillingDate = "";
+				if($i>0){
+					$previousFillingDate = $family_data['list'][$i-1]->filling_date;
+				}
+				if($previousFillingDate == $fillingDate){
+					$same = true;	
+					$cpCount++;
+					$w = $cpCount*240;
+					$w = $w + 240;
+					if($w>$svgWidth){
+						$svgWidth = $w;
+					}
+				} else {
+					$cpCount = 0;
+				}
+				$family_data['list'][$i]->same = $same;
+				$family_data['list'][$i]->count = $cpCount;
+				if($i==0){
+					$x = 70;
+					$y = 10;
+				} else {
+					$x = 70;
+					$y = (int)$family_data['list'][$i-1]->y_axis + 140;
+					if($same===true){
+						$previousSame = $family_data['list'][$i-1]->same;
+						if($previousSame==true){
+							$x = (int)$family_data['list'][$i-1]->x_axis + 230;
+							$y = (int)$family_data['list'][$i-1]->y_axis;
+						} else {
+							if($fS===false){
+								if($cpCount==1){
+									$x = 300;
+								} else {
+									$x = $family_data['list'][$i-1]->y_axis + 220;
+								}
+								$fS = true;
+							} else {
+								$x = 300;
+							}					
+						}
+						$y = (int)$family_data['list'][$i-1]->y_axis;
+						
+					} else {
+						$chCount++;
+					}
+				}							
+				$family_data['list'][$i]->x_axis = $x;
+				$family_data['list'][$i]->y_axis = $y;
+					if($i==0){
+					if($search===false){
+						$color = "#669900";
+					} else {
+						$color = "#ffbb33";
+					}
+				} else {
+					if($outside===true){
+						$color = "#33b5e5";
+					} else {
+						$color = "#ffbb33";
+					}
+				}
+				$family_data['list'][$i]->color = $color;
+				$family_data['list'][$i]->width = $width;
+				$family_data['list'][$i]->height = $height;
+				$claims = $family->claims;
+				$abstract = $family->abstracts;
+				$inventors = $family->inventors;
+				$assignee = $family->assignee;
+				$applicants = $family->applicants;
+				$image = $family->images;
+				$assigments = array();
+				if($family->assigments!=""){
+					try{
+						$assigments = json_decode($family->assigments);
+					}catch(Exception $e){
+						$this->logger->addInfo($e->getMessage());
+					}
+				}
+				if($image!=""){
+					try{
+						$images = json_decode($image);
+						if(count($images)>0 && trim($images[0])!=""){
+							$image = $images[0];
+							if(strpos($image,'https')===false){
+								$image = str_replace("http","https",$image);
+							}
+						}else {
+							$image = "";
+						}
+					}catch(Exception $e){
+						$this->logger->addInfo($e->getMessage());
+					}
+				}else {
+					$image = "";
+				}
+				$publicationDate = $family->publication_date;
+				$title = $family->title;
+				if($publicationDate!=""){
+					$publicationDate = substr($publicationDate,0,4).'-'.substr($publicationDate,4,2).'-'.substr($publicationDate,-2);
+				}
+				$applicationNumber = $family->application_country.$family->application_number.$family->application_kind;
+				/*unset*/
+				unset($family_data['list'][$i]->claims);
+				unset($family_data['list'][$i]->abstracts);
+				unset($family_data['list'][$i]->images);
+				unset($family_data['list'][$i]->title);
+				unset($family_data['list'][$i]->inventors);
+				unset($family_data['list'][$i]->assignee);
+				unset($family_data['list'][$i]->applicants);
+				/*End unset*/
+				if(strpos($claims,"claimsTree")===false){
+					$claims = DataController::cleanString($claims);
+				} else {
+					$claims = DataController::cleanStringWithoutStripTag($claims);
+				}
+				$abstract = DataController::cleanString($abstract);
+				$title = DataController::cleanString($title);
+				$inventors = DataController::cleanString($inventors);
+				$assignee = DataController::cleanString($assignee);
+				$applicants = DataController::cleanString($applicants);
+				$family_data['list'][$i]->claims = trim($claims);
+				$family_data['list'][$i]->abstract = trim($abstract);
+				$family_data['list'][$i]->application_number = $applicationNumber;
+				$family_data['list'][$i]->image = $image;
+				$family_data['list'][$i]->title = trim($title);
+				$family_data['list'][$i]->inventors = trim($inventors);
+				$family_data['list'][$i]->assignee = trim($assignee);
+				$family_data['list'][$i]->applicants = trim($applicants);
+				$family_data['list'][$i]->issue_date = $publicationDate;
+				$family_data['list'][$i]->assigments = $assigments;
+			}			
+			$svgHeight = $chCount * 160;
+			if(count($family_data['list'])>0){
+				for($i=0;$i<count($family_data['list']);$i++){
+					$y_axis = $family_data['list'][$i]->y_axis;
+					$x_axis = $family_data['list'][$i]->x_axis;
+					$orgApp = $family_data['list'][$i]->application_org_number;
+					if(isset($family_data['list'][$i+1]) && $family_data['list'][$i+1]->y_axis == $y_axis){
+						$yAxisUSAArray = array();
+						$nonUSAyAxisArray = array();
+						$yChangeArrayOrg = array();
+						if(strtolower($family_data['list'][$i]->publication_country)=="us"){
+							$yChangeArrayOrg[] = $family_data['list'][$i];
+							$yAxisUSAArray[] = $family_data['list'][$i]->application_org_number;
+						} else {
+							$nonUSAyAxisArray[] = $family_data['list'][$i]->application_org_number;
+							$yChangeArrayOrg[] = $family_data['list'][$i];
+						}				
+						for($j=$i+1;$j<count($family_data['list']);$j++){
+							$rec = $family_data['list'][$j];
+							if($rec->y_axis == $y_axis){
+								$yChangeArrayOrg[] = $rec;
+								if(strtolower($rec->publication_country)=="us"){
+									$yAxisUSAArray[] = $rec->application_org_number;
+								} else {
+									$nonUSAyAxisArray[] = $rec->application_org_number;
+								}
+							}					
+						}
+						sort($yAxisUSAArray);
+						$i = $i-1;
+						$tap = 0;
+						if(count($yAxisUSAArray)>0){
+							foreach($yAxisUSAArray as $appOrg){
+								$dt = array();
+								foreach($yChangeArrayOrg as $chgOrg){
+									if($appOrg==$chgOrg->application_org_number){
+										$dt =$chgOrg;
+										break;
+									}
+								}
+								if(count($dt)>0){
+									$i +=1; 
+									if($tap>0){
+										$oldXaxis = $family_data['list'][$i-1]->x_axis;
+										$dt->x_axis = $oldXaxis + 230;
+										$dt->same = true;
+									} else {
+										if($orgApp!=$dt->application_org_number){
+											$dt->x_axis = 70;
+											$dt->same = false;
+										}
+									}
+									$family_data['list'][$i] = $dt;
+									$tap++;
+								}
+							}
+						}
+						if(count($nonUSAyAxisArray)>0){
+							foreach($nonUSAyAxisArray as $appOrg){
+								$dt = array();
+								foreach($yChangeArrayOrg as $chgOrg){
+									if($appOrg==$chgOrg->application_org_number){
+										$dt =$chgOrg;
+										break;
+									}
+								}
+								if(count($dt)>0){
+									$i +=1; 
+									if(count($yAxisUSAArray)>0){
+										$oldXaxis = $family_data['list'][$i-1]->x_axis;
+										$dt->x_axis = $oldXaxis + 230; 
+										$dt->same = true;	
+									}
+									$family_data['list'][$i] = $dt;
+								}
+							}
+						}
+					}
+				}
+			}
+			/*Find Verticals*/
+			if(count($family_data['list'])>0){
+				for($i=0;$i<count($family_data['list']);$i++){
+					$relation = $family_data['list'][$i]->relation;
+					$xAppNumber = $family_data['list'][$i]->application_org_number;
+					$xAxis = $family_data['list'][$i]->x_axis;
+					$yAxis = $family_data['list'][$i]->y_axis;
+					if(count($relation)>0){
+						foreach($relation as $rel){
+							$relAppNumber = $rel->relation_number;
+							foreach($family_data['list'] as $assets){
+								if($assets->application_org_number == $relAppNumber && $xAxis == $assets->x_axis){
+									$verticals[] = array("id"=>$xAppNumber.$relAppNumber,"yexit"=>$yAxis,"yentry"=>$assets->y_axis);
+									break;
+								}
+							}
+						}
+					}
+				}
+			}
+			if(count($family_data['list'])>0){
+				for($i=0;$i<count($family_data['list']);$i++){
+					$relation = $family_data['list'][$i]->relation;
+					if(count($relation)>0){	
+						$recSort = array();
+						foreach($relation as $rel){
+							$recSort[]['relation_number'] = $rel->relation_number;
+						}
+						array_multisort($recSort, SORT_ASC, $relation);
+						$family_data['list'][$i]->relation = $relation;
+					}
+				}
+			}
+			if(count($family_data['list'])>0){
+				for($i=0;$i<count($family_data['list']);$i++){
+					$rect = $family_data['list'][$i];
+					$rectX = $rect->x_axis;
+					$relation = $rect->relation;
+					$xCArray = array();
+					if(count($relation)>0){
+						for($j=0;$j<count($relation);$j++){
+							$relationAppNumber = $relation[$j]->relation_number;
+							foreach($family_data['list'] as $list){
+								if($list->application_org_number == $relationAppNumber && $rectX==$list->x_axis){
+									$xCArray[] = $j;
+									break;
+								}
+							}
+						}
+						if(count($xCArray)>0){
+							foreach($xCArray as $c){
+								$relation[$c]->count = count($xCArray);
+							}
+							$family_data['list'][$i]->relation = $relation;
+						}
+					}
+				}
+			}
+			if(count($family_data['list'])>0){
+				foreach($family_data['list'] as $rec){
+					if(count($rec->relation)>0){
+						foreach($rec->relation as $relation){
+							$jsonRelations[] = $relation;
+						}				
+					}			
+				}
+			}
+			$jsonRectangles = $family_data['list'];
+			if(count($jsonRectangles)>0){
+				foreach($jsonRectangles as $rectangle){
+					$applicationListIDS[] = $rectangle->application_org_number;
+				}
+			}
+			if(count($jsonRectangles)>0){
+				foreach($jsonRectangles as $rectangle){
+					if(count($rectangle->relation)>0){
+						foreach($rectangle->relation as $relation){
+							$pID = $relation->patent_app_number;
+							$cID = $relation->relation_number;
+							$ID = $pID.$cID;
+							if(in_array($cID,$applicationListIDS)==true){
+								$entry = false;
+								if(count($childListIDs)>0){
+									if(in_array($ID,$childListIDs)==false){
+										$childListIDs[] = $ID;
+									} else {
+										$entry = true;
+									}
+								}						
+								if($entry===false){
+									if(count($childList)==0){
+										$childList[] = array($pID,1,155);
+										$parentList[] = array($cID,1,155);
+									}else {
+										$findApp = false;
+										$findPApp = false;
+										for($i=0;$i<count($childList);$i++){
+											if($childList[$i][0]==$pID){
+												$childList[$i][1] = $childList[$i][1]+1;
+												$childList[$i][2] = number_format(155/$childList[$i][1],2, '.', '');
+												$findApp = true;
+												break;
+											}
+										}
+										if($findApp === false){
+											$childList[] = array($pID,1,155);
+										}
+										for($i=0;$i<count($parentList);$i++){
+											if($parentList[$i][0]==$cID){
+												$parentList[$i][1] = $parentList[$i][1]+1;
+												$parentList[$i][2] = number_format(155/$parentList[$i][1],2, '.', '');
+												$findPApp = true;
+												break;
+											}
+										}
+										if($findPApp === false){
+											$parentList[] = array($cID,1,155);
+										}
+									}						
+								}
+							}					
+						}
+					}
+				}
+			}
+		}		
+		/*End of manipulating family list */
+		if(count($verticals)>0){
+			/*First sort by Yentry and then Yexit*/
+			DataController::sort_array_of_array($verticals, 'yentry');
+			DataController::sort_array_of_array($verticals, 'yexit');
+			if(count($verticals)>15){
+				$gapValue = 150/count($verticals);
+			} else {
+				$gapValue = 9;
+			}
+			$start = 80;
+			for($i=0;$i<count($verticals);$i++){
+				if($i>0){$start +=$gapValue;}
+				$verticals[$i]['x_axis'] = $start;
+			}
+		}
+		/*End sorting*/
+		if(count($family_data['list'])>0){
+			for($i=0;$i<count($family_data['list']);$i++){
+				$rect = $family_data['list'][$i];
+				$relation = $rect->relation;
+				$xAppNumber = $rect->application_org_number;
+				$xAxis = $rect->x_axis;
+				$yAxis = $rect->y_axis;
+				$childX = 0;
+				$parentCount = 0;
+				if(count($relation)>0){
+					$xCount = $xAxis;
+					$parentCount = 1;
+					$childECount = 0;
+					$childXCount = 0;
+					foreach($relation as $rel){
+						$relationNumber = $rel->relation_number;
+						$childX = 0;
+						if(count($childAppNumber)>0){
+							foreach($childAppNumber as $chd){
+								if($chd['app_number'] == $relationNumber){
+									$childX = $chd['x_axis'];
+									break;
+								}
+							}
+						}
+						if($childX==0){
+							foreach($family_data['list'] as $assets){
+								if($assets->application_org_number==$relationNumber){
+									$childX = $assets->x_axis;
+									$childAppNumber[] =array('app_number'=>$relationNumber,'x_axis'=>$assets->x_axis);
+									break;
+								}
+							}
+						}
+						if($childX>0 && $xAxis!=$childX){
+							foreach($family_data['list'] as $assets){
+								if(count($assets->relation)>0){
+									foreach($assets->relation as $aRelation){
+										if($aRelation->relation_number == $relationNumber ){
+											$parentCount++;
+											$xCount +=$assets->x_axis;
+											break;
+										}
+									}
+								}
+							}
+							$entry = "";
+							$avg = $xCount/$parentCount;
+							if($avg>$childX){
+								$entry = "right";
+							}else if($avg<$childX){
+								$entry = "left";
+							}else if($avg==$childX){
+								$entry = "center";
+							}
+							if($entry!=""){
+								$nonVerticalsEntries[] = array('app_rel_number'=>$xAppNumber.$relationNumber,'entry'=>$entry,'avg'=>$avg,'parent_count'=>$parentCount,'childX'=>$childX);
+							}
+							$childECount +=$childX;
+							$childXCount++;
+						}
+					}
+					if($childXCount>0){
+						$avg = $childECount/$childXCount;
+						if($avg>$xAxis){
+							$entry = "right";
+						}else if($avg<$xAxis){
+							$entry = "left";
+						}else if($avg==$xAxis){
+							$entry = "center";
+						}
+						if($entry!=""){
+							$nonVerticalsExits[] = array('app_rel_number'=>$xAppNumber,'entry'=>$entry,'avg'=>$avg,'parent_count'=>$childXCount,'childX'=>$xAxis);
+						}
+					}
+				}
+			}
+		}
+		$illustrationArray = array('_jsonRectangles'=>$jsonRectangles,'_jsonCountries'=>$countries,'_jsonRelations'=>$jsonRelations,'_chList'=>$childList,'_prList'=>$parentList,'_verticals'=>$verticals,'_nonverticals'=>$nonVerticalsEntries,'_nonverticalsExits'=>$nonVerticalsExits,'_width'=>($svgWidth+50),'_height'=>$svgHeight);
+		if(count($family_data['list'])>0){
+			$returnData = array('status'=>200,'data'=>$illustrationArray);
+		} else {
+			$returnData = array('status'=>200 ,'message'=>'No record found','data'=>array());
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+
+	/*
+		Claim Illustration
+		return Google Drive file link
+	*/
+	public function docket_claim($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			if($docketNumber>0){
+				$getLeadID = DataController::getLeadID($docketNumber);
+				if($getLeadID>0){
+					$getPatentList = DataController::getPatentList($getLeadID);
+					if(count($getPatentList)>0){
+						$patents = array();
+						foreach($getPatentList as $p){
+							$patents[] = $p->patent_number;
+						}
+						$illustrationData = array();
+						$patentImplode = str_repeat ('?, ',  count ($patents) - 1) . '?';
+						$queryIllustration = "SELECT file,patent_id FROM due_dilligence_illustrations WHERE patent_id IN ($patentImplode)";
+						$illustrationStmt = $this->db->prepare($queryIllustration);
+						$illustrationStmt->execute($patents);
+						if($illustrationStmt->rowCount()>0){
+							while($rowData = $illustrationStmt->fetch()){
+								$fileUrl = $rowData->file;
+								$fileUrl = str_replace("edit?usp=drivesdk","preview",$fileUrl);
+								$fileUrl = str_replace("edit?usp=sharing","preview",$fileUrl);
+								array_push($illustrationData, array('file'=>$fileUrl,'patent_number'=>$rowData->patent_id));
+							}
+							$returnData = array('status'=>200,'message'=>'','data'=>$illustrationData);
+						} else {
+							$returnData = array('status'=>200,'message'=>'No record found');
+						}
+					} else {
+						$returnData = array('status'=>200,'message'=>'No record found');
+					}
+				} else {
+					$returnData = array('status'=>200,'message'=>'Invalid input','error_code'=>300);
+				}
+			} else {
+				$returnData = array('status'=>200,'message'=>'Invalid docket','error_code'=>300);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>200,'message'=>'Internal server error','error_code'=>100);
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/*
+		Docket Invention
+	*/
+	
+	public function docket_invention($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			if($docketNumber>0){
+				$patentNumber = $req->getAttribute('value');
+				if(!empty($patentNumber)){
+					$sqlInvention ="SELECT problem,solution,infringement,system,products,companies,p_infringe,related_system_texts,infringe_text FROM due_dilligence_inventions WHERE patent_id=?";
+					$inventionStmt = $this->db->prepare($sqlInvention);
+					$inventionStmt->execute([$patentNumber]);
+					$problem="&nbsp;";
+					$solution="&nbsp;";
+					$infringement="&nbsp;";
+					$system="&nbsp;";
+					$products="&nbsp;";
+					$companies="&nbsp;";
+					$p_infringe="&nbsp;";
+					$relatedSystemText = "";
+					if($inventionStmt->rowCount()>0){
+						$getInventionData = $inventionStmt->fetch();
+						$problem = (!empty($getInventionData->problem))?$getInventionData->problem:'&nbsp;';
+						$solution = (!empty($getInventionData->solution))?$getInventionData->solution:'&nbsp;';
+						$infringement = (!empty($getInventionData->infringement))?$getInventionData->infringement:'&nbsp;';
+						$system = (!empty($getInventionData->system))?$getInventionData->system:'&nbsp;';
+						$products = (!empty($getInventionData->products))?$getInventionData->products:'&nbsp;';
+						$companies = (!empty($getInventionData->companies))?$getInventionData->companies:'&nbsp;';
+						$p_infringe = (!empty($getInventionData->p_infringe))?$getInventionData->p_infringe:'&nbsp;';
+						$relatedSystemText = $getInventionData->related_system_texts;
+						$infringe_text = $getInventionData->infringe_text;
+						$allExplanationText = array();
+						if($infringe_text!=""){
+							$textInfringe = json_decode($infringe_text);
+							if(count($textInfringe)>0 && (is_object($textInfringe) || is_array($textInfringe))){
+								foreach($textInfringe as $t){
+									array_push($allExplanationText,$t);
+								}
+							}
+						}
+						if(!empty($relatedSystemText)){
+							$allSystems = json_decode($relatedSystemText,true);
+							if(count($allSystems)>0 && is_array($allSystems)){
+								$al = 0;
+								$system = "";
+								foreach($allSystems as $allSystem){
+									if($al<3){
+										if(!empty($allSystem[0]) && !empty($allSystem[1])){
+$sqlPatentCategory ="SELECT name,parent,type FROM category WHERE id=( SELECT parent FROM category WHERE name = ? LIMIT 1)";
+$parentCatStmt = $this->db->prepare($sqlPatentCategory);
+$parentCatStmt->execute([$allSystem[1]]);
+if($parentCatStmt->rowCount()>0){
+	$parentCatData =$parentCatStmt->fetch();
+	if((int)$parentCatData->type==1){
+		$sqlPPatentCategory ="SELECT name,parent FROM category WHERE id = ?";
+		$ppatentCatStmt = $this->db->execute($sqlPPatentCategory);
+		$ppatentCatStmt->execute([$parentCatData->parent]);
+		if($ppatentCatStmt->rowCount()>0){
+		$parentPCatData = $ppatentCatStmt->fetch();
+		$system .= $parentPCatData->name .' - '.$parentCatData->name.' - '.$allSystem[1];
+		}else {
+			$system .= $parentCatData->name.' - '.$allSystem[1];
+		}
+	} else {
+		$system .= $parentCatData->name.' - '.$allSystem[1];
+	}
+} else {
+	$system .= $allSystem[1];
+}
+if($al<count($allSystem)){
+	$system .="<br/>";
+}
+										}
+									}
+									$al++;
+								}
+							}
+						}
+					}
+					$inventionData = array('problem'=>$problem,'solution'=>$solution,'infringement'=>$infringement,'system'=>$system,'products'=>$products,'companies'=>$companies,'p_infringe'=>$p_infringe,'related_system_text'=>$relatedSystemText);
+					$returnData = array('status'=>200,'data'=>$inventionData);
+				} else {
+					$returnData = array('status'=>200,'message'=>'Invalid input','error_code'=>300);
+				}
+			} else {
+				$returnData = array('status'=>200,'message'=>'Invalid docket','error_code'=>300);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/*
+		Docket Comparables
+		return list of agreements
+	*/
+	public function docket_comparables($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			if($docketNumber>0){
+				$docketID = DataController::getDocketID($docketNumber);
+				if($docketID>0){
+					$queryComparable = "SELECT file_name,payment_terms,licensor,licensee,file_link FROM comparables WHERE license_id= ?";
+					$comparableStmt = $this->db->prepare($queryComparable);
+					$comparableList = array();
+					$comparableStmt->execute([$docketID]);
+					if($comparableStmt->rowCount()>0){
+						while($row = $comparableStmt->fetch()){
+							array_push($comparableList,$row);
+						}
+						$returnData = array('status'=>200,'data'=>$comparableList);
+					} else {
+						$returnData = array('status'=>200,'message'=>'No record found','data'=>$comparableList);
+					}
+				} else {
+					$returnData = array('status'=>200,'message'=>'Invalid docket','error_code'=>300);
+				}
+			} else {
+				$returnData = array('status'=>200,'message'=>'Bad Inputs','error_code'=>400);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>500,'message'=>'Internal server error','error_code'=>100);
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	/*
+		Docket Royalties
+		return royalty file
+	*/
+	public function docket_royalties($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			if($docketNumber>0){
+				$docketID = DataController::getDocketID($docketNumber);
+				if($docketID>0){
+					$queryRoyalty = "SELECT file_name,file_link FROM damages WHERE license_id= ?";
+					$royaltyStmt = $this->db->prepare($queryRoyalty);
+					$royaltyList = array();
+					$royaltyStmt->execute([$docketID]);
+					if($royaltyStmt->rowCount()>0){
+						while($row = $royaltyStmt->fetch()){
+							array_push($royaltyList,$row);
+						}
+						$returnData = array('status'=>200,'data'=>$royaltyList);
+					} else {
+						$returnData = array('status'=>200,'message'=>'No record found','data'=>$royaltyList);
+					}
+				} else {
+					$returnData = array('status'=>200,'message'=>'Invalid docket','error_code'=>300);
+				}
+			} else {
+				$returnData = array('status'=>200,'message'=>'Bad Inputs','error_code'=>400);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>500,'message'=>'Internal server error','error_code'=>100);
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/*
+		Docket Citations
+		param: t=>1(FCitations)or t=>0(BCitations)
+	*/
+	public function docket_citations($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			if($docketNumber>0){
+				$getLeadID = DataController::getLeadID($docketNumber);
+				if($getLeadID>0){
+					$patentList = DataController::getPatentList($getLeadID);
+					if(count($patentList)>0){
+						$citationList = array();
+						$postData = $req->getParsedBody();
+						$type = $postData['t'];
+						for($i=0;$i<count($patentList);$i++){
+							$queryCitation ="SELECT id,cited_patent,original_assignee,applicant,title FROM due_dilligence_citations WHERE patent_id=? AND type=? ORDER BY applicant ASC";
+							$citationStmt = $this->db->prepare($queryCitation);
+							$citationStmt->execute([$patentList[$i]->patent_number,$type]);
+							$list = array();
+							if($citationStmt->rowCount()>0){
+								while($row = $citationStmt->fetch()){
+									array_push($list,$row);
+								}
+							}
+							array_push($citationList,array('patent_number'=>$patentList[$i]->patent_number,'file_no'=>$patentList[$i]->id,'list'=>$list));
+						}
+						$returnData = array('status'=>200,'data'=>$citationList);
+					} else {
+						$returnData = array('status'=>200,'data'=>array(),'message'=>'No record found!');
+					}
+				} else {
+					$returnData = array('status'=>200,'error_code'=>400,'message'=>'Invalid input');
+				}
+			} else {
+				$returnData = array('status'=>200,'error_code'=>400,'message'=>'Invalid input');
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>500,'error_code'=>500,'message'=>'Internal server error');
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	/*
+		Docket Clogos
+		param: t=>1(FCitations)or t=>0(BCitations)
+	*/
+	public function docket_clogos($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			if($docketNumber>0){
+				$getLeadID = DataController::getLeadID($docketNumber);
+				if($getLeadID>0){
+					$patentList = DataController::getPatentList($getLeadID);
+					if(count($patentList)>0){
+						$displayData = array();
+						$applicantsList = array();
+						$postData = $req->getParsedBody();
+						if(isset($postData['app_list'])){
+							$applicantsList = $postData['app_list'];
+						}
+						$patents = array();
+						foreach($patentList as $p){
+							$patents[] = $p->patent_number;
+						}
+						$patentImplode = str_repeat ('?, ',  count ($patents) - 1) . '?';
+						$type = $postData['t'];
+						$queryCitation = "SELECT id, original_assignee,applicant,'' as logo, '' as logo1 FROM due_dilligence_citations WHERE patent_id IN ($patentImplode) AND type=?";
+						$citationStmt = $this->db->prepare($queryCitation);
+						$citationStmt->execute(array_merge($patents,array($type)));
+						if($citationStmt->rowCount()>0){
+							$citationData = array();
+							while($row = $citationStmt->fetch()){
+								array_push($citationData,$row);
+							}
+							foreach($citationData as $c){
+								$recordData = array();
+								if(count($applicantsList)>0){
+									foreach($applicantsList as $app){
+										$app = (object)$app;
+										if(trim($app->applicant)!="" && trim($c->applicant)!=""){
+											if(strpos($app->applicant,$c->applicant)!==false){
+												$recordData = $app;
+												break;
+											}
+										}
+									}
+								}
+								$newData = array();
+								if(count($recordData)>0){
+									if($recordData->img!="" && strpos($recordData->img,"http")!==false){
+										$newData = array('id'=>$c->id,'logo'=>$recordData->img,'sd'=>true,'logo1'=>'','applicant'=>$recordData->applicant,'applicant1'=>'');
+									}
+								}
+								if(count($newData)>0){
+									if($c->applicant==$c->original_assignee){
+										array_push($displayData,$newData);
+									} else {
+										$recordData1 = array();
+										if(count($applicantsList)>0){
+											foreach($applicantsList as $app){
+												$app = (object)$app;
+												if(trim($app->applicant)!="" && trim($c->original_assignee)!=""){
+													if(strpos($app->applicant,$c->original_assignee)!==false){
+														$recordData1 = $app;
+														break;
+													}
+												}
+											}
+										}
+										$newData1 = array();
+										if(count($recordData1)>0){
+											if($recordData1->img!="" && strpos($recordData1->img,"http")!==false){
+												$newData1 = array('id'=>$c->id,'logo'=>$recordData1->img,'sd'=>false,'logo1'=>'','applicant'=>$recordData1->applicant);
+											}
+										}
+										if(count($newData1)>0){
+											if($newData1['logo']!=$newData['logo']){
+												$newData['sd'] = false;
+												$newData['logo1'] = $newData1['logo'];
+												$newData['applicant1'] = $newData1['applicant'];
+											} 
+										} else {
+											$getData = DataController::findCompanyLogo($c->original_assignee,$applicantsList,$con,1);
+											if($getData['count']==0){
+												if(explode(" ",$c->original_assignee)>1){
+													$getData = DataController::findCompanyLogo($c->original_assignee,$applicantsList,$con,2);
+													if($getData['count']==0){
+														$getData = DataController::findCompanyLogo($c->original_assignee,$applicantsList,$con,3);
+														if($getData['count']==0){
+															$getData = array('applicant'=>$c->original_assignee,'applicantList'=>$applicantsList,'img'=>'','count'=>0,'company_logo'=>'');
+														}
+													}
+												}
+											}
+											$applicantsList = $getData['applicantList'];
+											if($getData['company_logo']!="" && $newData['logo']!=$getData['company_logo']){
+												$newData['sd'] = false;
+												$newData['logo1'] = $getData['company_logo'];
+												$newData['applicant1'] = $getData['applicant'];
+											}
+										}
+										array_push($displayData,$newData);
+									}
+								} else {
+									$getData = DataController::findCompanyLogo($c->applicant,$applicantsList,1);
+									if($getData['count']==0){
+										if(explode(" ",$c->applicant)>1){
+											$getData = DataController::findCompanyLogo($c->applicant,$applicantsList,2);
+											if($getData['count']==0){
+												$getData = DataController::findCompanyLogo($c->applicant,$applicantsList,3);
+												if($getData['count']==0){
+													$getData = array('applicant'=>$c->applicant,'applicantList'=>$applicantsList,'img'=>'','count'=>0,'company_logo'=>'');
+												}
+											}
+										}
+									}
+									$applicantsList = $getData['applicantList'];
+									if(isset($getData['img']) && $getData['img']!=""){
+										$imgCurrentAssignee = $getData['img'];
+										$newData = array('id'=>$c->id,'logo'=>$imgCurrentAssignee,'sd'=>true,'logo1'=>'','applicant'=>$getData['applicant'],'applicant1'=>'');
+										if($c->applicant == $c->original_assignee){
+											array_push($displayData,$newData);
+										} else {
+											$recordData1 = array();
+											if(count($applicantsList)>0){
+												foreach($applicantsList as $app){
+													$app = (object)$app;
+													if(trim($app->applicant)!="" && trim($c->original_assignee)!=""){
+														if(strpos($app->applicant,$c->original_assignee)!==false){
+															$recordData1 = $app;
+															break;
+														}
+													}
+												}
+											}
+											$newData1 = array();
+											if(count($recordData1)>0){
+												if($recordData1->img!="" && strpos($recordData1->img,"http")!==false){
+													$newData1 = array('id'=>$c->id,'logo'=>$recordData1->img,'sd'=>false,'logo1'=>'','applicant'=>$recordData1->applicant);
+												}
+											}
+											if(count($newData1)>0){
+												if($newData1['logo']!=$imgCurrentAssignee){
+													$newData['sd'] = false;
+													$newData['logo1'] = $newData1['logo'];
+													$newData['applicant1'] = $newData1['applicant'];
+												} 
+											} else {
+												$getData = DataController::findCompanyLogo($c->original_assignee,$applicantsList,1);
+												if($getData['count']==0){
+													if(explode(" ",$c->original_assignee)>1){
+														$getData = DataController::findCompanyLogo($c->original_assignee,$applicantsList,2);
+														if($getData['count']==0){
+															$getData = DataController::findCompanyLogo($c->original_assignee,$applicantsList,3);
+															if($getData['count']==0){
+																$getData = array('applicant'=>$c->original_assignee,'applicantList'=>$applicantsList,'img'=>'','count'=>0,'company_logo'=>0);
+															}
+														}
+													}
+												}
+												$applicantsList = $getData['applicantList'];
+												if(isset($getData['img']) && $getData['img']!=""){
+													if($imgCurrentAssignee != $getData['img']){
+														$newData['sd'] = false;
+														$newData['logo1'] = $getData['img'];
+														$newData['applicant1'] = $getData['applicant'];
+													} 
+												}
+											}
+											array_push($displayData,$newData);
+										}
+									}
+								}
+							}
+						}
+						$cLogosData = array('i_list'=>$displayData,'a_list'=>$applicantsList);
+						$returnData = array('status'=>200,'data'=>$cLogosData);
+					} else {
+						$returnData = array('status'=>200,'message'=>'Invalid docket','error_code'=>300);
+					}
+				} else {
+					$returnData = array('status'=>200,'message'=>'Bad Input','error_code'=>400);
+				}
+			} else {
+				$returnData = array('status'=>200,'message'=>'Bad Input','error_code'=>400);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>500,'message'=>'Internal server error','error_code'=>500);
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/*
+		Docket Seller
+		param: patent number
+	*/
+	
+	public function docket_seller($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			$patentNumber = $req->getAttribute('value');
+			if($docketNumber>0 && trim($patentNumber)!=""){
+				$getLicenseID = DataController::getDocketID($docketNumber);
+				if($getLicenseID>0){
+					$licenseData = array();
+					$sqlLicenseData ="SELECT licensee_file,licensee,expiration,expiration_valid,license_products,license_products_text,territory,territory_text,license_fee,transferable,subject_condition_assignable,sublicense,subject_condition_sublicense,exclusive,subject_condition_exclusive,right_to_sue,subject_condition_right_to_sue,target,show_data FROM due_dilligence_licenses_data WHERE license_id=? AND patent_id=?";
+					$licenseStmt = $this->db->prepare($sqlLicenseData);
+					$licenseStmt->execute([$getLicenseID,$patentNumber]);
+					if($licenseStmt->rowCount()>0){
+						while($row = $licenseStmt->fetch()){
+							array_push($licenseData,$row);
+						}
+					}
+					$titleData = array();
+					$patentData = "";
+					$lengthString = strlen($patentNumber);
+					switch($lengthString){
+						case 9:
+							$patentData =substr($patentNumber,2);
+						break;
+						case 11:
+						case 13:
+							$patentData =substr($patentNumber,2);
+							$patentData =substr($patentData,0,-2);
+						break;
+						default:
+							$patentData = $patentNumber;
+						break;
+					}
+					$sqlTitle ="SELECT title_file,assignor,assignee,assignee_date,recorded,rights,comment FROM due_dilligence_titles WHERE patent_id=?";
+					$titleStmt = $this->db->prepare($sqlTitle);
+					$titleStmt->execute([$patentData]);
+					if($titleStmt->rowCount()>0){
+						while($row = $titleStmt->fetch()){
+							array_push($titleData,$row);
+						}
+					}
+					$thirdPartyData = array();
+					$sqlParty ="SELECT invloved_third_party,date_of_aggreement,comment,party,knowledge,show_data FROM due_dilligence_parties_data WHERE patent_id=? AND license_id=?";
+					$partyStmt = $this->db->prepare($sqlParty);
+					$partyStmt->execute([$patentNumber,$getLicenseID]);
+					if($partyStmt->rowCount()>0){
+						while($row = $partyStmt->fetch()){
+							array_push($thirdPartyData,$row);
+						}
+					}
+					$standardData = array();
+					$sqlStandard ="SELECT sdo,working_group,start_date,participants_claim,patent_file,commitment_file,knowledge,show_data,patent_data_another FROM due_dilligence_standards_data WHERE patent_id=? AND license_id=?";
+					$standardStmt = $this->db->prepare($sqlStandard);
+					$standardStmt->execute([$patentNumber,$getLicenseID]);
+					if($standardStmt->rowCount()>0){
+						while($row = $standardStmt->fetch()){
+							array_push($standardData,$row);
+						}
+					}
+					$collateralData = array();
+					$sqlCollateral ="SELECT creditor_name,date_for_aggreement,expirtation_date,terminated_file,comment,knowledge,show_data FROM due_dilligence_collaterals_data WHERE patent_id=? AND license_id=?";
+					$collateralStmt = $this->db->prepare($sqlCollateral);
+					$collateralStmt->execute([$patentNumber,$getLicenseID]);
+					if($collateralStmt->rowCount()>0){
+						while($row = $collateralStmt->fetch()){
+							array_push($collateralData,$row);
+						}
+					}
+					$returnData = array('status'=>200,'data'=>array('licenses'=>$licenseData,'title'=>$titleData,'party'=>$thirdPartyData,'standards'=>$standardData,'collaterals'=>$collateralData));
+				} else {
+					$returnData = array('status'=>200,'message'=>'Invalid docket','error_code'=>300);
+				}
+			} else {
+				$returnData = array('status'=>200,'message'=>'Bad Input','error_code'=>400);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>500,'message'=>'Internal server error','error_code'=>500);
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	
+	/*
+		Docket PDF
+		return Google Drive file link
+	*/
+	public function docket_pdf($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			if($docketNumber>0){
+				$getLeadID = DataController::getLeadID($docketNumber);
+				if($getLeadID>0){
+					$getPatentList = DataController::getPatentList($getLeadID);
+					if(count($getPatentList)>0){
+						$patents = array();
+						foreach($getPatentList as $p){
+							$patents[] = $p->patent_number;
+						}
+						$patentImplode = str_repeat ('?, ',  count ($patents) - 1) . '?';
+						$pdfData = array();
+						$queryPdf = "SELECT file_url,patent_id FROM due_dilligence_pdf WHERE patent_id IN ($patentImplode)";
+						$pdfStmt = $this->db->prepare($queryPdf);
+						$pdfStmt->execute($patents);
+						if($pdfStmt->rowCount()>0){
+							while($rowData = $pdfStmt->fetch()){
+								$fileUrl = $rowData->file_url;
+								$fileUrl = str_replace("edit?usp=drivesdk","preview",$fileUrl);
+								$fileUrl = str_replace("edit?usp=sharing","preview",$fileUrl);
+								array_push($pdfData, array('file'=>$fileUrl,'patent_number'=>$rowData->patent_id));
+							}
+							$returnData = array('status'=>200,'message'=>'','data'=>$pdfData);
+						} else {
+							$returnData = array('status'=>200,'message'=>'No record found');
+						}
+					} else {
+						$returnData = array('status'=>200,'message'=>'No record found');
+					}
+				} else {
+					$returnData = array('status'=>200,'message'=>'Invalid input','error_code'=>300);
+				}
+			} else {
+				$returnData = array('status'=>200,'message'=>'Invalid docket','error_code'=>300);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>200,'message'=>'Internal server error','error_code'=>100);
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	
+	/*
+		Docket Validity
+		param: patent number
+	*/
+	
+	public function docket_validity($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			$patentNumber = $req->getAttribute('value');
+			if($docketNumber>0 && trim($patentNumber)!=""){
+				$sqlValidity ="SELECT expired_status,legal_text,legal_status,legal_source,legal_source_drive,legal_source1,legal_source1_drive,terminal_status,terminal_text,terminal_date,terminal_source,terminal_source_drive,ipr_status,ip_text,ip_complete,ipr_date,ipr_by,ipr_complete_date,ipr_source,ipr_source_drive,reexam_status,reexam_text,reexam_complete,reexam_date,reexam_by,reexam_source,reexam_source_drive,reexam_complete_date,litigation_status,litigation_text,litigation_defandants,litigation_source,litigation_source_drive,chain_status,chain_text,chain_longer,chain_source,chain_source_drive FROM due_dilligence_legal WHERE patent_id=?";
+				$validityStmt = $this->db->prepare($sqlValidity);
+				$validityStmt->execute([$patentNumber]);
+				$validityData = array();
+				if($validityStmt->rowCount()>0){
+					$validityData = $validityStmt->fetch();
+				}
+				$returnData = array('status'=>200,'data'=>$validityData);
+			} else {
+				$returnData = array('status'=>200,'message'=>'Invalid docket','error_code'=>300);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>500,'message'=>'Internal server error','error_code'=>500);
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/*
+		Docket companies
+		return list of companies
+	*/
+	
+	public function docket_companies($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			if($docketNumber>0){
+				$getLeadID = DataController::getLeadID($docketNumber);
+				if($getLeadID>0){
+					$queryInvitees = "SELECT c.company_name as company FROM backyard_invitees as b INNER JOIN company as c ON c.id = b.contact_id WHERE lead_id =?  AND c.id<>?";
+					$inviteesStmt = $this->db->prepare($queryInvitees);
+					$inviteesStmt->execute([$getLeadID, 1]);
+					$companiesList = array();
+					if($inviteesStmt->rowCount()>0){
+						while($rowData = $inviteesStmt->fetch()){
+							array_push($companiesList,$rowData);
+						}
+						$returnData = array('status'=>200,'message'=>'','data'=>$companiesList);
+					}else {
+						$returnData = array('status'=>200,'message'=>'No record found');
+					}
+				} else {
+					$returnData = array('status'=>200,'message'=>'Invalid input','error_code'=>300);
+				}
+			} else {
+				$returnData = array('status'=>200,'message'=>'Invalid docket','error_code'=>300);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>200,'message'=>'Internal server error','error_code'=>100);
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/*
+		Docket patents
+		return list of patents
+	*/
+	
+	public function docket_patents($app,$req,$resp,$args = []){
+		$returnData = array('status'=>500,'message'=>'','data'=>'');
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		/*Get docketNumber*/
+		try{
+			$docketNumber = $req->getAttribute('docket_number');
+			if($docketNumber>0){
+				$getLeadID = DataController::getLeadID($docketNumber);
+				if($getLeadID>0){
+					$patentList = DataController::getPatentList($getLeadID);
+					$message = "";
+					if(count($patentList)==0){
+						$message = "No record found";
+					}
+					$returnData = array('status'=>200,'message'=>$message,'data'=>$patentList);
+				} else {
+					$returnData = array('status'=>200,'message'=>'Invalid input','error_code'=>300);
+				}
+			} else {
+				$returnData = array('status'=>200,'message'=>'Invalid docket','error_code'=>300);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>200,'message'=>'Internal server error','error_code'=>100);
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	*	Categories
+	*	return list of child categories
+	*/
+	
+	public function categories($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		try{
+			$parentCategoryID = $req->getAttribute('parent_category');
+			$queryChildCategory = "SELECT name FROM category WHERE parent=? ORDER BY name ASC";
+			$categoryStmt = $this->db->prepare($queryChildCategory);
+			$categoryStmt->execute([$parentCategoryID]);
+			if($categoryStmt->rowCount()>0){
+				$list = array();
+				while($row = $categoryStmt->fetch()){
+					array_push($list,$row);
+				}
+				$returnData = array('status'=>200,'message'=>'','data'=>$list);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>500,'message'=>'Internal server error','error_code'=>500);
+		}		
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	
+	/**
+	*	main_categories
+	*	return list of main categories
+	*/
+	
+	public function main_categories($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		try{
+			$queryChildCategory = "SELECT distinct(c.id) as id, c.name FROM category as c INNER JOIN map_sectors_departments as sc ON sc.category_id= c.id WHERE sc.sector_id=? ORDER BY c.id ASC";
+			$categoryStmt = $this->db->prepare($queryChildCategory);
+			$categoryStmt->execute([21]);
+			if($categoryStmt->rowCount()>0){
+				$list = array();
+				while($row = $categoryStmt->fetch()){
+					array_push($list,$row);
+				}
+				$returnData = array('status'=>200,'message'=>'','data'=>$list);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>500,'message'=>'Internal server error','error_code'=>500);
+		}		
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* Customer Login
+	*
+	*/
+	public function login($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$postData = $req->getParsedBody();
+			if(isset($postData['email']) && isset($postData['password'])){
+				if(trim($postData['email'])!="" && trim($postData['password'])!=""){
+					$checkUser = DataController::checkCustomerLogin($postData['email'],$postData['password']);
+					if(count($checkUser)>0){
+						if((int)$checkUser->status==1){
+							$returnData['message'] = "Please make sure the email address and password you provided relate to an activated account. If you have not yet received an activation email you may either contact SynPat customer relations by phone or at customers@synpat.com.";
+						} else if((int)$checkUser->status==0){
+							/*	Authenticated
+								Generate Token
+							*/
+							$payload = array(
+								"iss"     => "https://synpat.com/shop",
+								"iat"     => time(),
+								"exp"     => time() + (3600 * 24 * 15),
+								"context" => [
+									"user" => [
+										"user_login" => $checkUser->email,
+										"user_id"    => $checkUser->id,
+										"user_data"  => $checkUser,
+										"crm_alias"    => 'docket-api'
+									]
+								]
+							);	
+							$key = $this->get('settings')['docket-key'];
+							$jwt = JWT::encode($payload, $key);
+							/**/
+							$insertID = DataController::insertData('docket_tokens',array('user_id'=>$checkUser->id,'token'=>$jwt,'date_created'=>$payload['iat'],'date_expiration'=>$payload['exp']));
+							if($insertID>0){
+								$returnData['status'] = 200;
+								$returnData['data'] = ["token" => $jwt];
+								$returnData['message'] = "Authenticated!";
+							} else {
+								$returnData['status'] = 500;
+								$returnData['error_code'] = "100";
+								$returnData['message'] = "Internal server error";
+							}
+						} else {
+							$returnData['message']='You account is suspended. Please wait.';
+						}
+					} else {
+						$returnData['message']="Invalid email and password";
+					}
+				} else {
+					$returnData['message']="Invalid email and password";
+				}
+			} else {
+				$returnData['message']="Invalid email and password";
+			}
+		}catch(Exception $e){
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	/**
+	* Check Captcha
+	*/
+	public function check_captcha($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'validate'=>false);
+		try{
+			$postData = $req->getParsedBody();
+			$returnData['validate'] = DataController::googleCaptcha($postData['captcha']);			
+		}catch(Exception $e){
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	
+	/**
+	* Check Availability
+	*/
+	public function check_availability($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		$postData = $req->getParsedBody();
+		$licenseNumber = $postData['portfolio_number'];
+		try{
+			$checkLicense = DataController::checkLicense($licenseNumber);
+			if(count($checkLicense)>0){
+				/*Request from Store or Docket, if request from docket then check with email and password and if request from store then check with Authentication Token p_type=>0 from docket and p_type=>1 from store*/
+				$newUser = 0;
+				$userData = array();
+				if($postData['p_type'] == 0){
+					if($postData['email']!="" && $postData['password']!=""){
+						$checkUser = DataController::checkCustomerLogin($postData['email'],$postData['password']);
+						if(count($checkUser)>0){
+							if($checkUser->status==0){
+								$userData = $checkUser;
+							}
+						}
+					} else {
+						$newRequest = array('person_email'=>$postData['user_email'],'person_name'=>$postData['user_name'],'company_name'=>$postData['user_company'],'password'=>$postData['user_password'],'confirm_password'=>$postData['user_confirm_password'],'phone_number'=>$postData['user_phone']);
+						$insertUser = DataController::insertCustomerRequest($newRequest,0);
+						if(isset($insertUser['id']) && $insertUser['id']>0){
+							$name = explode(" ",$postData['user_name']);
+							$lastName = str_replace($name[0],"",$postData['user_name']);
+							$userData = (object)array('id'=>$insertUser['id'],'email'=>$postData['user_email'],'first_name'=>$name[0],'last_name'=>trim($lastName),'company_name'=>$postData['user_company'],'phone_number'=>$postData['user_phone']);
+							$newUser = 1;
+						}
+					}					
+				} else if($postData['p_type'] == 1){
+					$headers = $req->getHeaders();
+					$auth = $headers['HTTP_AUTHORIZATION'];
+					$checkAuthorization = false;
+					if(isset($auth[0]) && $auth[0]!=""){
+						$checkAuthorization = DataController::checkToken($auth[0]);
+					}
+					if($checkAuthorization===true){
+						$key = $this->get('settings')['docket-key'];
+						$decodeToken = JWT::decode($auth[0], $key);
+						if(count($decodeToken)>0 && isset($decodeToken['user']) && count($decodeToken['user'])>0){
+							$userData = $decodeToken['user']['user_data'];
+						}
+					}					
+				}
+				if(count($userData)>0){
+					if(!empty($postData['check_available_company'])){
+						$postData['check_availability_request_for'] = 3;
+					}
+					$name = $userData->firstName." ".$returnUserData->lastName;
+					$insertCheckRequest = DataController::insertData('request_for_check_availabilty',array('license_id'=>$checkLicense->id,'company_name'=>$userData->company_name,'person_name'=>$name,'person_phone'=>$userData->phone_number,'person_email'=>$userData->email,'create_date'=>date('Y-m-d H:i:s'),'customer_id'=>$userData->id,'check_for'=>$postData['check_available_company'],'type'=>$postData['check_availability_request_for']));
+					if($insertCheckRequest>0){
+						if($newUser==1){
+							$queryUpdate= "UPDATE customer_request SET request_id=? WHERE id=?";
+							$requestStmt = $this->db->prepare($queryUpdate);
+							$requestStmt->execute([$insertCheckRequest,$userData->id]);
+						}
+						$message = "Thank you for sending your request.";
+					}
+				}
+			}
+		}catch(Exception $e){
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/*
+	* Download Agreement File
+	*/
+	
+	public function download_file($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$postData = $req->getParsedBody();
+			$licenseNumber = $postData['portfolio_number'];
+			$checkLicense = DataController::checkLicense($licenseNumber);
+			if(count($checkLicense)>0){
+				/*Request from Store or Docket, if request from docket then check with email and password and if request from store then check with Authentication Token p_type=>0 from docket and p_type=>1 from store*/
+				$userData = array();
+				if($postData['p_type'] == 0){
+					if($postData['email']!="" && $postData['password']!=""){
+						$checkUser = DataController::checkCustomerLogin($postData['email'],$postData['password']);
+						if(count($checkUser)>0){
+							if($checkUser->status==0){
+								$userData = $checkUser;
+							}
+						}
+					}					
+				} else if($postData['p_type'] == 1){
+					$headers = $req->getHeaders();
+					$auth = $headers['HTTP_AUTHORIZATION'];
+					$checkAuthorization = false;
+					if(isset($auth[0]) && $auth[0]!=""){
+						$checkAuthorization = DataController::checkToken($auth[0]);
+					}
+					if($checkAuthorization===true){
+						$key = $this->get('settings')['docket-key'];
+						$decodeToken = JWT::decode($auth[0], $key);
+						if(count($decodeToken)>0 && isset($decodeToken['user']) && count($decodeToken['user'])>0){
+							$userData = $decodeToken['user']['user_data'];
+						}
+					}					
+				}
+				if(count($userData)>0){
+					$queryCheckDownload = "SELECT file FROM pos_agreements WHERE customer_id IN (SELECT id FROM customers WHERE company_id=?) AND type=1 AND file_type=? AND lead_id=(SELECT id FROM litigations WHERE serial_number=?) ORDER BY id ASC LIMIT 1";
+					$downloadStmt = $this->db->prepare($queryCheckDownload);
+					$downloadStmt->execute([$userData->company_id,$postData['file_type'],$licenseNumber]);
+					if($downloadStmt->rowCount()>0){
+						$getDownloadResult = $downloadStmt->fetch();
+						if(!empty($fileDownload)){
+							$fileDownload = str_replace('/edit?usp=drivesdk','&exportFormat=pdf',$fileDownload);
+							$fileDownload = str_replace('/view?usp=drivesdk','&exportFormat=pdf',$fileDownload);
+							$fileDownload = str_replace('/edit','&exportFormat=pdf',$fileDownload);
+							$fileDownload = str_replace('/view','&exportFormat=pdf',$fileDownload);
+							$fileDownload = str_replace('https://docs.google.com/document/d/','https://docs.google.com/feeds/download/documents/export/Export?id=',$fileDownload);
+							$fileDownload = str_replace('https://drive.google.com/file/d/','https://docs.google.com/feeds/download/documents/export/Export?id=',$fileDownload);
+							$returnData['data']['file'] = $fileDownload;
+						}
+					}
+				}
+			}
+		}catch(Exception $e){
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* Send Message to SynPat
+	*
+	*/
+	public function send_message($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$postData = $req->getParsedBody();
+			$licenseNumber = $postData['portfolio_number'];
+			$checkLicense = DataController::checkLicense($licenseNumber);
+			if(count($checkLicense)>0){
+				/*Request from Store or Docket, if request from docket then check with email and password and if request from store then check with Authentication Token p_type=>0 from docket and p_type=>1 from store*/
+				$userData = array();
+				if($postData['p_type'] == 0){
+					if($postData['email']!="" && $postData['password']!=""){
+						$checkUser = DataController::checkCustomerLogin($postData['email'],$postData['password']);
+						if(count($checkUser)>0){
+							if($checkUser->status==0){
+								$userData = $checkUser;
+							}
+						}
+					}					
+				} else if($postData['p_type'] == 1){
+					$headers = $req->getHeaders();
+					$auth = $headers['HTTP_AUTHORIZATION'];
+					$checkAuthorization = false;
+					if(isset($auth[0]) && $auth[0]!=""){
+						$checkAuthorization = DataController::checkToken($auth[0]);
+					}
+					if($checkAuthorization===true){
+						$key = $this->get('settings')['docket-key'];
+						$decodeToken = JWT::decode($auth[0], $key);
+						if(count($decodeToken)>0 && isset($decodeToken['user']) && count($decodeToken['user'])>0){
+							$userData = $decodeToken['user']['user_data'];
+						}
+					}					
+				}
+				if(count($userData)>0){
+					if(isset($postData['file_no']) && (int)$postData['file_no']>0){
+						$query = "UPDATE draft_revised_documents SET message=? WHERE id=?";
+						$messageStmt = $this->db->prepare($query);
+						$messageStmt->execute([$postData['message'],(int)$postData['file_no']]);
+						if($messageStmt->rowCount()>0){
+							
+						}
+					} else if(isset($postData['revised']['file_draft'])){
+						$columnName = "";
+						switch((int)$postData['rf_type']){
+							case 1:
+								$columnName = "request_aggreement";
+							break;
+							case 2:
+								$columnName = "license_aggreement";
+							break;
+							case 3:
+								$columnName = "strategic_aggreement";
+							break;
+						}
+						$query ="UPDATE draft_revised_documents SET message=? WHERE ".$columnName." = ?";
+						$messageStmt = $this->db->prepare($query);
+						$messageStmt->execute([$postData['message'],$postData['file_draft']]);
+						if($messageStmt->rowCount()>0){
+							
+						}
+					}
+				}			
+			}
+		}catch(Exception $e){
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* List of Pending Documents
+	*
+	*/
+	public function pending_list_of_documents($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$postData = $req->getParsedBody();
+			$licenseNumber = $postData['portfolio_number'];
+			$checkLicense = DataController::checkLicense($licenseNumber);
+			$list = array();
+			if(count($checkLicense)>0){
+				/*Request from Store or Docket, if request from docket then check with email and password and if request from store then check with Authentication Token p_type=>0 from docket and p_type=>1 from store*/
+				$userData = array();
+				if($postData['p_type'] == 0){
+					if($postData['email']!="" && $postData['password']!=""){
+						$checkUser = DataController::checkCustomerLogin($postData['email'],$postData['password']);
+						if(count($checkUser)>0){
+							if($checkUser->status==0){
+								$userData = $checkUser;
+							}
+						}
+					}					
+				} else if($postData['p_type'] == 1){
+					$headers = $req->getHeaders();
+					$auth = $headers['HTTP_AUTHORIZATION'];
+					$checkAuthorization = false;
+					if(isset($auth[0]) && $auth[0]!=""){
+						$checkAuthorization = DataController::checkToken($auth[0]);
+					}
+					if($checkAuthorization===true){
+						$key = $this->get('settings')['docket-key'];
+						$decodeToken = JWT::decode($auth[0], $key);
+						if(count($decodeToken)>0 && isset($decodeToken['user']) && count($decodeToken['user'])>0){
+							$userData = $decodeToken['user']['user_data'];
+						}
+					}					
+				}
+				if(count($userData)>0){
+					$queryPendingExecutedPaymentList = "SELECT a.type as action_type,a.doc_type as license,a.id as fileNo ,target.company_name as target FROM potential_participates as a LEFT JOIN company as target ON target.id = a.company_id WHERE a.status=3 AND a.license_id=(SELECT id FROM licenses WHERE license_number=?) AND a.customer_id IN(SELECT id FROM customers WHERE company_id =?)";
+					$listStmt = $this->db->prepare($queryPendingExecutedPaymentList);
+					$listStmt->execute([$licenseNumber,$userData->company_id]);
+					if($listStmt->rowCount()>0){
+						while($row = $listStmt->fetch()){
+							array_push($list,$row);
+						}
+					}
+				}
+			}
+		}catch(Exception $e){
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	*	Draft Document
+	*
+	*/
+	public function customize_document($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		$postData = $req->getParsedBody();
+		$licenseNumber = $postData['portfolio_number'];
+		try{
+			$checkLicense = DataController::checkLicense($licenseNumber);
+			if(count($checkLicense)>0){
+				/*Request from Store or Docket, if request from docket then check with email and password and if request from store then check with Authentication Token p_type=>0 from docket and p_type=>1 from store*/
+				$newUser = 0;
+				$userData = array();
+				if($postData['p_type'] == 0){
+					if($postData['email']!="" && $postData['password']!=""){
+						$checkUser = DataController::checkCustomerLogin($postData['email'],$postData['password']);
+						if(count($checkUser)>0){
+							if($checkUser->status==0){
+								$userData = $checkUser;
+							}
+						}
+					} else {
+						$newRequest = array('person_email'=>$postData['user_email'],'person_name'=>$postData['user_name'],'company_name'=>$postData['user_company'],'password'=>$postData['user_password'],'confirm_password'=>$postData['user_confirm_password'],'phone_number'=>$postData['user_phone']);
+						$insertUser = DataController::insertCustomerRequest($newRequest,0);
+						if(isset($insertUser['id']) && $insertUser['id']>0){
+							$name = explode(" ",$postData['user_name']);
+							$lastName = str_replace($name[0],"",$postData['user_name']);
+							$userData = (object)array('id'=>$insertUser['id'],'email'=>$postData['user_email'],'first_name'=>$name[0],'last_name'=>trim($lastName),'company_name'=>$postData['user_company'],'phone_number'=>$postData['user_phone']);
+							$newUser = 1;
+						}
+					}					
+				} else if($postData['p_type'] == 1){
+					$headers = $req->getHeaders();
+					$auth = $headers['HTTP_AUTHORIZATION'];
+					$checkAuthorization = false;
+					if(isset($auth[0]) && $auth[0]!=""){
+						$checkAuthorization = DataController::checkToken($auth[0]);
+					}
+					if($checkAuthorization===true){
+						$key = $this->get('settings')['docket-key'];
+						$decodeToken = JWT::decode($auth[0], $key);
+						if(count($decodeToken)>0 && isset($decodeToken['user']) && count($decodeToken['user'])>0){
+							$userData = $decodeToken['user']['user_data'];
+						}
+					}					
+				}
+				if(count($userData)>0){
+					$checkDraftFile = "";
+					$columnName = "";
+					switch((int)$postData['file_type']){
+						case 1:
+							$columnName = "request_aggreement";
+						break;
+						case 2:
+							$columnName = "license_aggreement";							
+						break;
+						case 3:
+							$columnName = "strategic_aggreement";
+						break;
+					}
+					$checkData = array();
+					$myMessage = "";
+					if($newUser==0){
+						if(!empty($columnName)){
+							$queryCheck = "SELECT * FROM revised_documents WHERE customer_id = (SELECT id FROM customer WHERE company_id=?) AND ".$columnName."<>'' AND license_id =  ? AND type=?";
+							$revisedStmt = $this->db->prepare($queryCheck);
+							$revisedStmt->execute([$userData->company_id,$checkLicense->id,$postData['rf_type']]);
+							if($revisedStmt->rowCount()>0){
+								$checkData = $revisedStmt->fetch();
+								if(!empty($checkData->{$columnName})){
+									$checkDraftFile = $checkData->{$columnName};
+									$myMessage =  $checkData->message;
+								}
+								$draft = $checkData->id;
+							}
+							$resultQueryCheck = $con->query($queryCheck);
+							if($resultQueryCheck){
+								$checkData = mysqli_fetch_object($resultQueryCheck);
+								if(count($checkData)>0){
+									if(!empty($checkData->{$columnName})){
+										$checkDraftFile = $checkData->{$columnName};
+										$myMessage =  $checkData->message;
+									}
+									$draft = $checkData->id;
+								}
+							}
+						}
+					}
+					if(empty($checkDraftFile)){
+						$queryColumn = "";
+						switch((int)$postData['rf_type']){
+							case 1:
+								$queryColumn = "purchase_buy";
+							break;
+							case 2:
+								$queryColumn = "purchase_license";
+							break;
+							case 3:
+								$queryColumn = "strategic_license_agreement";
+							break;
+						}
+						if(!empty($queryColumn)){
+							$query = "SELECT li.id,l.id as leadID, l.folder_id as folderID,".$queryColumn." FROM licenses as li INNER JOIN litigations as l ON l.serial_number = li.license_number WHERE li.license_number=?";
+							$documentStmt = $this->db->prepare($query);
+							$documentStmt->execute([$licenseNumber]);
+							if($documentStmt->rowCount()>0){
+								$resultLicense = $docketStmt->fetch();
+								if(count($licenseResult)>0){
+									$fileDraft = DataController::createDraftFile($licenseResult->folderID,$licenseResult->{$queryColumn},$userData->company_name);
+									$checkResponse = preg_replace('/\\\\\"/',"\"", $fileDraft);
+									$checkResponse = json_decode($checkResponse);
+									if(isset($checkResponse->file) && $checkResponse->success>0){
+										if(!empty($checkResponse->file)){
+											$name = $userData->first_name ." ".$userData->last_name;
+											$message = $postData['revised']['message'];
+											$fType = $postData['file_type'];
+											$licenseAgreementFile = "";
+											$strategicAgreementFile = "";
+											$requestAgreementFile = "";
+											if($fType==2){
+												$licenseAgreementFile = $checkResponse->file;
+											} else if($fType==3){
+												$strategicAgreementFile = $checkResponse->file;
+											} else if($fType==1){
+												$requestAgreementFile = $checkResponse->file;
+											}
+											$update = false;
+											if(count($checkData)>0){
+												$update = true;
+											}
+											$fileName = $checkResponse->file_name;
+											$tablename = "draft_revised_documents";
+											if($newUser==0){
+												$tablename = "revised_documents";
+											}
+											if($update === false){
+												$insertData = DataController::insertData($tablename, array('license_id'=>$checkLicense->id,'message'=>'','license_aggreement'=>$licenseAgreementFile,'strategic_aggreement'=>$strategicAgreementFile,'request_aggreement'=>$requestAgreementFile,'customer_id'=>$userData->id,'type'=>$fType,'create_date'=>date('Y-m-d H:i:s'),'file_name'=>$fileName));
+												if($insertData>0){
+													if($newUser==1){
+														$query = "UPDATE customer_request SET request_id=? WHERE id=?";
+														$requestStmt = $this->db->prepare($query);
+														$requestStmt->execute([$insertData,$userData->id]);
+													}
+													$draft = $insertData;
+													$error = 0;
+													$success = 1;
+													$message = "";
+													$file = $checkResponse->file;
+												}
+											} else {
+												/*Update*/
+												$queryUpdate = "";
+												if($fType==2){
+													$queryUpdate = "UPDATE draft_revised_documents SET license_aggreement=? WHERE id=?";
+												} else if($fType==3){
+													$queryUpdate = "UPDATE draft_revised_documents SET strategic_aggreement=? WHERE id=?";
+												} else if($fType==1){
+													$queryUpdate = "UPDATE draft_revised_documents SET request_aggreement=? WHERE id=?";
+												}
+												if(!empty($queryUpdate)){
+													$documentRevisedStmt = $this->db->prepare($queryUpdate);
+													$documentRevisedStmt->execute([$checkResponse->file,$checkData->id]);
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}else {
+						$error = 0;
+						$success = 1;
+						$message = "";
+						$file = $checkDraftFile;
+					}
+				}
+			}
+		}catch(Exception $e){
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	/**
+	* Request for Participation
+	*/
+	public function request_for_participate($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$postData = $req->getParsedBody();
+			$licenseNumber = $postData['portfolio_number'];
+			$checkLicense = DataController::checkLicense($licenseNumber);
+			$list = array();
+			if(count($checkLicense)>0){
+				/*Request from Store or Docket, if request from docket then check with email and password and if request from store then check with Authentication Token p_type=>0 from docket and p_type=>1 from store*/
+				$userData = array();
+				if($postData['p_type'] == 0){
+					if($postData['email']!="" && $postData['password']!=""){
+						$checkUser = DataController::checkCustomerLogin($postData['email'],$postData['password']);
+						if(count($checkUser)>0){
+							if($checkUser->status==0){
+								$userData = $checkUser;
+							}
+						}
+					}					
+				} else if($postData['p_type'] == 1){
+					$headers = $req->getHeaders();
+					$auth = $headers['HTTP_AUTHORIZATION'];
+					$checkAuthorization = false;
+					if(isset($auth[0]) && $auth[0]!=""){
+						$checkAuthorization = DataController::checkToken($auth[0]);
+					}
+					if($checkAuthorization===true){
+						$key = $this->get('settings')['docket-key'];
+						$decodeToken = JWT::decode($auth[0], $key);
+						if(count($decodeToken)>0 && isset($decodeToken['user']) && count($decodeToken['user'])>0){
+							$userData = $decodeToken['user']['user_data'];
+						}
+					}					
+				}
+				if(count($userData)>0){
+					$fileName = "";								
+					$type = $postData['f_type'];
+					if($type=="" || $type=="0"){
+						$type = 1;
+					}
+					if((int)$type>1){
+						$type = 2;
+					} else {
+						$type = 1;
+					}
+					$fileObject = "";
+					$uploadedFiles = $request->getUploadedFiles();
+					if($postData['f_type']==1 || $postData['f_type']==2){
+						$fileObject = $uploadedFiles['upload_request_file'];
+					} else if($postData['f_type']==3){
+						$fileObject = $uploadedFiles['upload_request_file1'];
+					}
+					if ($fileObject->getError() === UPLOAD_ERR_OK) {
+						$uploadFileName = $fileObject->getClientFilename();
+						$tmp_name = $_FILES["file_request"];
+						$allowed =  array('pdf');
+						$name = $licenseNumber."_".$uploadFileName;
+						$ext = pathinfo($name, PATHINFO_EXTENSION);
+						if(in_array(strtolower(strtoupper($ext)),$allowed) ) {
+							$data = array('file1' => "@".$tmp_name.';filename='.$name);
+							$fileName = DataController::uploadFile($data);
+							if (count($fileName)>0 && isset($fileName['file1']) && !empty($fileName['file1'])) {
+								try{
+									$name = $userData->first_name." ".$userData->last_name;
+									$insertData = DataController::insertData('request_to_participates',array('license_id'=>$checkLicense->id,'file'=>$fileName['file1'],'type'=>$type,'create_date'=>date('Y-m-d H:i:s'),'customer_id'=>$userData->id));
+									if($insertData>0){
+										$returnUserData['error'] = 0;
+										$returnUserData['success'] = 1;
+										$returnUserData['message'] = "Thank you for sending your request. We will get back to you shortly.";
+									}
+								}catch(Exception $e){
+									
+								}
+							}
+						}
+					}
+				}
+			}
+		}catch(Exception $e){
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	/**
+	* Proof of Payment or Signed Agreement
+	*/
+	
+	public function uploadAgreementOrProofOfPayment($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$postData = $req->getParsedBody();
+			$licenseNumber = $postData['portfolio_number'];
+			$checkLicense = DataController::checkLicense($licenseNumber);
+			if(count($checkLicense)>0){
+				/*Request from Store or Docket, if request from docket then check with email and password and if request from store then check with Authentication Token p_type=>0 from docket and p_type=>1 from store*/
+				$userData = array();
+				if($postData['p_type'] == 0){
+					if($postData['email']!="" && $postData['password']!=""){
+						$checkUser = DataController::checkCustomerLogin($postData['email'],$postData['password']);
+						if(count($checkUser)>0){
+							if($checkUser->status==0){
+								$userData = $checkUser;
+							}
+						}
+					}					
+				} else if($postData['p_type'] == 1){
+					$headers = $req->getHeaders();
+					$auth = $headers['HTTP_AUTHORIZATION'];
+					$checkAuthorization = false;
+					if(isset($auth[0]) && $auth[0]!=""){
+						$checkAuthorization = DataController::checkToken($auth[0]);
+					}
+					if($checkAuthorization===true){
+						$key = $this->get('settings')['docket-key'];
+						$decodeToken = JWT::decode($auth[0], $key);
+						if(count($decodeToken)>0 && isset($decodeToken['user']) && count($decodeToken['user'])>0){
+							$userData = $decodeToken['user']['user_data'];
+						}
+					}					
+				}
+				if(count($userData)>0){
+					/*check files*/
+					$uploadedFiles = $request->getUploadedFiles();
+					$uploadedFile = $uploadedFiles['file_request'];
+					if ($uploadedFile->getError() === UPLOAD_ERR_OK) {
+						$uploadFileName = $uploadedFile->getClientFilename();
+						$tmp_name = $_FILES["file_request"];
+						$allowed =  array('pdf');
+						$name = $licenseNumber."_".$uploadFileName;
+						$ext = pathinfo($name, PATHINFO_EXTENSION);
+						if(in_array(strtolower(strtoupper($ext)),$allowed) ) {
+							$data = array('file1' => "@".$tmp_name.';filename='.$name);
+							$fileName = DataController::uploadFile($data);
+							if (count($fileName)>0 && isset($fileName['file1']) && !empty($fileName['file1'])) {
+								try{
+									$cusID = $userData['id'];
+									$companyID = $userData['company_id'];
+									if($cusID>0 && $companyID>0){
+										if((int)$postData['request_for']>0){
+											$checkPotentialData = DataController::checkPotentialData($checkLicense->id,$companyID,$postData['request_for']);
+											if(count($checkPotentialData)>0){
+												$fileUpload = $postData['drp_upload_agreements'];
+												$filed = "";
+												if($fileUpload==2 || $fileUpload==3){
+													$filed = "execute_agreement=?";
+												}else if($fileUpload==4){
+													$filed = "proof_of_payment=?";
+												}
+												if($filed!=""){
+													$updateQuery = "UPDATE potential_participates SET ".$filed." ,upload_date='?' WHERE id=?";
+													$potentialStmt = $this->db->prepare($updateQuery);
+													$potentialStmt->execute([$fileName['file1'],date('Y-m-d H:i:s'),$checkPotentialData->id]);
+													if($potentialStmt->rowCount()>0){
+														$message = "Your file submitted successfully, We will contact you shortly.";
+													}
+												}
+											} else {
+												$message = "Invalid input data";
+											}
+										}
+									}
+								}catch(Exception $e){
+									
+								}
+							}
+						}
+					}
+
+				}
+			}
+		}catch(Exception $e){
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* Find User Whishlist
+	*/
+	public function user_wishlist($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		$errorPersonalInfo = "";
+		$successPersonalInfo = "";
+		try{
+			$headers = $req->getHeaders();
+			$auth = $headers['HTTP_AUTHORIZATION'];
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){
+				$key = $this->get('settings')['docket-key'];
+				try{
+					$decodeToken = JWT::decode($auth[0], $key, array('HS256'));
+					if(count($decodeToken)>0 && isset($decodeToken->context->user) && count($decodeToken->context->user)>0){
+						$getUserInfo = DataController::getUserInfo($decodeToken->context->user->user_id);
+						if(count($getUserInfo)>0){
+							$queryWhishlist = 'SELECT w.portfolio_id FROM wishlist as w WHERE w.customer_id IN (SELECT id FROM customers WHERE company_id = ?) ORDER BY w.id ASC';
+							$whishlistStmt = $this->db->prepare($queryWhishlist);
+							$whishlistStmt->execute([$getUserInfo->company_id]);
+							if($whishlistStmt->rowCount()>0){
+								$list = array();
+								while($row = $whishlistStmt->fetch()){
+									array_push($list,$row->portfolio_id);
+								}
+								$portfoliosID = str_repeat ('?, ',  count ($list) - 1) . '?';
+								$queryPortfolio = "SELECT a.store_name,a.option_expiration_data,a.seller_asking_price,a.category,a.active_button,a.potential_participants,a.final_participants,a.regular_license_starts,a.late_license_starts,a.store,a.cost_price,li.file_left,li.file_middle,li.file_right,li.file_four,li.file_five,li.file_six,li.file_seven,li.file_eight,li.file_nine,li.file_ten,li.file_eleven,li.file_twelve,li.file_thirteen,li.file_fourteen,li.file_fiveteen,li.file_sixteen,li.file_sixteen,l.lead_name,l.serial_number,li.id as licenseID FROM acquisition as a LEFT JOIN litigations as l ON l.id=a.lead_id LEFT JOIN licenses as li ON l.serial_number=li.serial_number WHERE li.id IN ($portfoliosID) AND l.status IN ('0','1','2')";
+								$portfolioStmt = $this->db->prepare($queryPortfolio);
+								$portfolioStmt->execute($list);
+								if($portfolioStmt->rowCount()>0){
+									$productList = array();
+									while($row = $portfolioStmt->fetch()){
+										$rowData = $row;
+										$images = array();
+										if($rowData->file_left!=""){
+											array_push($images,$rowData->file_left);
+										}
+										unset($rowData->file_left);
+										if($rowData->file_middle!=""){
+											array_push($images,$rowData->file_middle);
+										}
+										unset($rowData->file_middle);
+										if($rowData->file_right!=""){
+											array_push($images,$rowData->file_right);
+										}
+										unset($rowData->file_right);
+										if($rowData->file_four!=""){
+											array_push($images,$rowData->file_four);
+										}
+										unset($rowData->file_four);
+										if($rowData->file_five!=""){
+											array_push($images,$rowData->file_five);
+										}
+										unset($rowData->file_five);
+										if($rowData->file_six!=""){
+											array_push($images,$rowData->file_six);
+										}
+										unset($rowData->file_six);
+										if($rowData->file_seven!=""){
+											array_push($images,$rowData->file_seven);
+										}
+										unset($rowData->file_seven);
+										if($rowData->file_eight!=""){
+											array_push($images,$rowData->file_eight);
+										}
+										unset($rowData->file_eight);
+										if($rowData->file_nine!=""){
+											array_push($images,$rowData->file_nine);
+										}
+										unset($rowData->file_nine);
+										if($rowData->file_ten!=""){
+											array_push($images,$rowData->file_ten);
+										}
+										unset($rowData->file_ten);
+										if($rowData->file_eleven!=""){
+											array_push($images,$rowData->file_eleven);
+										}
+										unset($rowData->file_eleven);
+										if($rowData->file_twelve!=""){
+											array_push($images,$rowData->file_twelve);
+										}
+										unset($rowData->file_twelve);
+										if($rowData->file_thirteen!=""){
+											array_push($images,$rowData->file_thirteen);
+										}
+										unset($rowData->file_thirteen);
+										if($rowData->file_fourteen!=""){
+											array_push($images,$rowData->file_fourteen);
+										}
+										unset($rowData->file_fourteen);
+										if($rowData->file_fiveteen!=""){
+											array_push($images,$rowData->file_fiveteen);
+										}
+										unset($rowData->file_fiveteen);
+										if($rowData->file_sixteen!=""){
+											array_push($images,$rowData->file_sixteen);
+										}
+										unset($rowData->file_sixteen);
+										$rowData->images = $images;
+										$todayDate = strtotime(date('Y-m-d',strtotime('now')));
+										$expirationDate = strtotime($rowData->option_expiration_data);
+										$regularLicense = strtotime($rowData->regular_license_starts);
+										$lateLicense = strtotime($rowData->late_license_starts);
+										if(($rowData->option_expiration_data!='0000-00-00 00:00:00' && $expirationDate>$todayDate && $rowData->regular_license_starts=='0000-00-00 00:00:00') || (int)$rowData->cost_price==0){
+											if($rowData->active_button!='1'){
+												$rowData->active_button = 1;
+												/*UpdateData*/
+												DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('active_button'=>$rowData->active_button));
+												DataController::updateData('licenses',array('serial_number'=>$row->serial_number),array('active_button'=>$rowData->active_button));
+											}
+										} else if($rowData->cost_price>0 && $rowData->regular_license_starts!='0000-00-00 00:00:00'){
+											if($rowData->late_license_starts=='0000-00-00 00:00:00'){
+												/*echo "1";*/
+												$lateLicense = date('m/d/Y',strtotime('+4 months',$regularLicense));
+												$rowData->late_license_starts = date('Y-m-d H:i:s',strtotime($lateLicense));
+												DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('late_license_starts'=>$rowData->late_license_starts,'active_button'=>$rowData->active_button));
+											} 
+											if($todayDate>$regularLicense && $todayDate<$lateLicense ){
+												/*echo "2";*/
+												if($rowData->active_button!=2){
+													$rowData->active_button = 2;
+													DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('active_button'=>$rowData->active_button));
+													$this->updateLicenseDataBySerialNumber('licenses',array('serial_number'=>$row->serial_number),array('active_button'=>$rowData->active_button));
+												}
+											} else if($todayDate>$regularLicense && $todayDate>=$lateLicense){
+												/*echo "3";*/
+												if($rowData->active_button!=3){
+													$rowData->active_button = 3;
+													DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('active_button'=>$rowData->active_button));
+													$this->updateLicenseDataBySerialNumber('licenses',array('serial_number'=>$row->serial_number),array('active_button'=>$rowData->active_button));
+												}						
+											}					
+										}
+										array_push($productList, $rowData);
+									}
+									$returnData['status'] = 200;
+									$returnData['data'] = $productList;
+								}
+							}
+						} else {
+							$returnData['status'] = 200;
+							$returnData['error_code'] = "998";
+							$returnData['message'] = "User blocked. Contact SynPat customer relations by phone or at customers@synpat.com.";
+						}
+					} else {
+						$returnData['status'] = 200;
+						$returnData['error_code'] = "102";
+						$returnData['message'] = "Token Expired";
+					}
+				}catch(\Exception $e){						
+					$this->logger->addInfo($e->getMessage());
+					$returnData['status'] = 200;
+					$returnData['error_code'] = "102";
+					$returnData['message'] = "Token Expired";
+				}
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "999";
+				$returnData['message'] = "Invalid token, Login again.";
+			}			
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* Add Customer Wish list
+	* paramter portfolioID
+	*/
+	public function add_customer_wishlist($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$headers = $req->getHeaders();
+			$auth = $headers['HTTP_AUTHORIZATION'];
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){
+				$key = $this->get('settings')['docket-key'];
+				try{
+					$decodeToken = JWT::decode($auth[0], $key, array('HS256'));
+					if(count($decodeToken)>0 && isset($decodeToken->context->user) && count($decodeToken->context->user)>0){
+						$getUserInfo = DataController::getUserInfo($decodeToken->context->user->user_id);
+						if(count($getUserInfo)>0){
+							
+						} else {
+							$returnData['status'] = 200;
+							$returnData['error_code'] = "998";
+							$returnData['message'] = "User blocked. Contact SynPat customer relations by phone or at customers@synpat.com.";
+						}
+					} else {
+						$returnData['status'] = 200;
+						$returnData['error_code'] = "102";
+						$returnData['message'] = "Token Expired";
+					}
+				}catch(\Exception $e){						
+					$this->logger->addInfo($e->getMessage());
+					$returnData['status'] = 200;
+					$returnData['error_code'] = "102";
+					$returnData['message'] = "Token Expired";
+				}
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "999";
+				$returnData['message'] = "Invalid token, Login again.";
+			}			
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	/**
+	* Find User preferences
+	*/
+	
+	public function user_preferences($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$headers = $req->getHeaders();
+			$auth = $headers['HTTP_AUTHORIZATION'];
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){
+				$key = $this->get('settings')['docket-key'];
+				try{
+					$decodeToken = JWT::decode($auth[0], $key, array('HS256'));
+					if(count($decodeToken)>0 && isset($decodeToken->context->user) && count($decodeToken->context->user)>0){
+						$getUserInfo = DataController::getUserInfo($decodeToken->context->user->user_id);
+						if(count($getUserInfo)>0){
+							$query = "SELECT p.preference_id,c.name FROM preferences as p INNER JOIN category as c ON c.id = p.preference_id WHERE p.customer_id IN (SELECT id FROM customers WHERE company_id=?)";
+							$preferencesStmt = $this->db->prepare($query);
+							$preferencesStmt->execute([$getUserInfo->company_id]);
+							if($preferencesStmt->rowCount()>0){
+								$list = array();
+								while($row = $preferencesStmt->fetch()){
+									array_push($list,$row);
+								}
+								$returnData['data'] = $list;
+							}
+						} else {
+							$returnData['status'] = 200;
+							$returnData['error_code'] = "998";
+							$returnData['message'] = "User blocked. Contact SynPat customer relations by phone or at customers@synpat.com.";
+						}
+					} else {
+						$returnData['status'] = 200;
+						$returnData['error_code'] = "102";
+						$returnData['message'] = "Token Expired";
+					}
+				}catch(\Exception $e){						
+					$this->logger->addInfo($e->getMessage());
+					$returnData['status'] = 200;
+					$returnData['error_code'] = "102";
+					$returnData['message'] = "Token Expired";
+				}
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "999";
+				$returnData['message'] = "Invalid token, Login again.";
+			}			
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* Find User company Info
+	*
+	*/
+	public function company_info($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$headers = $req->getHeaders();
+			$auth = $headers['HTTP_AUTHORIZATION'];
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){
+				$key = $this->get('settings')['docket-key'];
+				try{
+					$decodeToken = JWT::decode($auth[0], $key, array('HS256'));
+					if(count($decodeToken)>0 && isset($decodeToken->context->user) && count($decodeToken->context->user)>0){
+						$getUserInfo = DataController::getUserInfo($decodeToken->context->user->user_id);
+						if(count($getUserInfo)>0){
+							$queryCompany = "SELECT company_name,company_address,telephone,bank_name,bank_account_no,routing_no FROM company WHERE id=?";
+							$companyStmt = $this->db->prepare($queryCompany);
+							$companyStmt->execute([$getUserInfo->company_id]);
+							if($companyStmt->rowCount()>0){
+								$companyInfo = $companyStmt->fetch();
+								$accountNumber = $companyInfo->bank_account_no;
+								if(!empty($accountNumber)){
+									$accountNumber = str_repeat('x', (strlen($accountNumber) - 4)). substr($accountNumber,-4,4);
+								}
+								$companyInfo->bank_account_no = $accountNumber;
+								$routingNo = $companyInfo->routing_no;
+								if(!empty($routingNo)){
+									$routingNo = str_repeat('x', (strlen($routingNo) - 3)). substr($routingNo,-3,3);
+								}
+								$companyInfo->routing_no = $routingNo;
+								$returnData['data'] = $companyInfo;
+							}
+						} else {
+							$returnData['status'] = 200;
+							$returnData['error_code'] = "998";
+							$returnData['message'] = "User blocked. Contact SynPat customer relations by phone or at customers@synpat.com.";
+						}
+					} else {
+						$returnData['status'] = 200;
+						$returnData['error_code'] = "102";
+						$returnData['message'] = "Token Expired";
+					}
+				}catch(\Exception $e){						
+					$this->logger->addInfo($e->getMessage());
+					$returnData['status'] = 200;
+					$returnData['error_code'] = "102";
+					$returnData['message'] = "Token Expired";
+				}
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "999";
+				$returnData['message'] = "Invalid token, Login again.";
+			}			
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* Find Company users list
+	*
+	*/
+	public function users_list($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$headers = $req->getHeaders();
+			$auth = $headers['HTTP_AUTHORIZATION'];
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){
+				$key = $this->get('settings')['docket-key'];
+				try{
+					$decodeToken = JWT::decode($auth[0], $key, array('HS256'));
+					if(count($decodeToken)>0 && isset($decodeToken->context->user) && count($decodeToken->context->user)>0){
+						$getUserInfo = DataController::getUserInfo($decodeToken->context->user->user_id);
+						if(count($getUserInfo)>0){
+							$queryCustomers = "SELECT first_name,last_name,email,phone_number,id FROM customers WHERE company_id =?";
+							$customersStmt = $this->db->prepare($queryCustomers);
+							$customersStmt->execute([$getUserInfo->company_id]);
+							if($customersStmt->rowCount()>0){
+								$list = array();
+								while($row = $customersStmt->fetch()){
+									$row->token = base64_encode($row->email.'&&&'.$row->id.'&&&');
+									unset($row->id);
+									array_push($list,$row);
+								}
+								$returnData['data'] = $list;
+							}
+						} else {
+							$returnData['status'] = 200;
+							$returnData['error_code'] = "998";
+							$returnData['message'] = "User blocked. Contact SynPat customer relations by phone or at customers@synpat.com.";
+						}
+					} else {
+						$returnData['status'] = 200;
+						$returnData['error_code'] = "102";
+						$returnData['message'] = "Token Expired";
+					}
+				}catch(\Exception $e){						
+					$this->logger->addInfo($e->getMessage());
+					$returnData['status'] = 200;
+					$returnData['error_code'] = "102";
+					$returnData['message'] = "Token Expired";
+				}
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "999";
+				$returnData['message'] = "Invalid token, Login again.";
+			}			
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	/**
+	* User account 
+	* change password or add user
+	*/
+	public function user_account($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		$errorPersonalInfo = "";
+		$successPersonalInfo = "";
+		try{
+			$headers = $req->getHeaders();
+			$auth = $headers['HTTP_AUTHORIZATION'];
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){
+				$key = $this->get('settings')['docket-key'];
+				$decodeToken = JWT::decode($auth[0], $key);
+				if(count($decodeToken)>0 && isset($decodeToken['user']) && count($decodeToken['user'])>0){
+					$userData = $decodeToken['user']['user_data'];
+					$postData = $req->getParsedBody();
+					if($postData['change_password']==1){
+						if(isset($postData['old_password']) && !empty($postData['old_password']) && !empty($postData['new_password'])){
+							$getUserInfo = DataController::getUserInfo($userData->id);
+							if(md5($postData->old_password) == $userData->password){
+								$queryUpdate = "UPDATE customer SET password =? WHERE id = ?";
+								$customerStmt = $this->db->prepare($queryUpdate);
+								$customerStmt->execute([md5($postData->new_password),$userData->id]);
+								if($customerStmt->rowCount()>0){
+									$errorPersonalInfo = "";
+									$successPersonalInfo = "Successfully update your password.";
+								} else {
+									$errorPersonalInfo = "Internal server error";
+									$successPersonalInfo = "";
+								}
+							}
+						}
+					}
+					if(isset($postData->change_details) && $postData->change_details=='1'){
+						if(!empty($postData->my_first_name) && !empty($postData->my_phone_number)){
+							$queryUpdate = "UPDATE customer SET first_name =?,last_name =?,phone_number =?, WHERE id = ?";
+							$customerStmt = $this->db->prepare($queryUpdate);
+							$customerStmt->execute([$postData->my_first_name,$postData->my_last_name,$userData->id]);
+							if($customerStmt->rowCount()>0){
+								$errorPersonalInfo = "";
+								$successPersonalInfo = "Successfully update your password.";
+							} else {
+								$errorPersonalInfo = "Internal server error";
+								$successPersonalInfo = "";
+							}
+						}
+					}
+					if(isset($postData->company_address) && !empty($postData->company_address) && !empty($postData->telephone) && !empty($postData->bank_name) && !empty($postData->bank_account_no) && !empty($postData->routing_no)){
+						$updateCompany = "UPDATE company SET company_address=?,telephone=?,bank_name=?,bank_account_no=?,routing_no=? WHERE id=?";
+						$companyStmt = $this->db->prepare($updateCompany);
+						$companyStmt->execute([$postData->company_address,$postData->telephone,$postData->bank_name,$postData->bank_account_no,$postData->routing_no,$userData->company_id]);
+					}
+					if(isset($postData->first_name) && count($postData->first_name)>0){
+						for($i=0;$i<count($postData->first_name);$i++){
+							if(!empty($postData->first_name[$i]) && !empty($postData->email_address[$i])){
+								$checkUser = $this->customer_model->checkEmail($postData->email_address[$i]);			
+								if($checkUser==0){
+									$user = array();
+									$user['first_name'] = $postData->first_name[$i];
+									$user['last_name'] = $postData->last_name[$i];
+									$user['email'] = $postData->email_address[$i];
+									$user['phone_number'] = $postData->phone_number[$i];
+									$user['password'] = md5('123456');
+									$user['status'] = $postData->status;
+									$user['company_id'] = $userData->company_id;
+									$user['create_date'] = date('Y-m-d H:i:s');
+									$userID = DataController::insertData('customers',$user);
+									if($userID>0){
+										$insertUsers[] = $userID;
+										unset($user['create_date']);
+										unset($user['status']);
+										unset($user['password']);
+										$user['phone'] = $user['phone_number'];
+										unset($user['phone_number']);
+										DataController::insertData('contacts',$user);
+										$successUser[] = $user['email'];
+										$error = "";
+									} else {
+										$error = "Internal server error";
+									}
+								} else {
+									$errorUser[] = $postData->email_address[$i];
+								}
+							}
+						}
+					}
+				}
+			} else {
+				$message = "Invalid token";
+			}			
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* Customer Transaction 
+	* return list of licenses bought by customer
+	*/
+	
+	public function user_transaction($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array('granted'=>array(),'demo'=>array(),'footer'=>array()));
+		$errorPersonalInfo = "";
+		$successPersonalInfo = "";
+		try{
+			$headers = $req->getHeaders();
+			$auth = $headers['HTTP_AUTHORIZATION'];
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){
+				$key = $this->get('settings')['docket-key'];
+				try{
+					$decodeToken = JWT::decode($auth[0], $key, array('HS256'));
+					if(count($decodeToken)>0 && isset($decodeToken->context->user) && count($decodeToken->context->user)>0){
+						$getUserInfo = DataController::getUserInfo($decodeToken->context->user->user_id);
+						if(count($getUserInfo)>0){
+							/**/
+							$query = "SELECT l.*, lead.lead_name,lead.serial_number,cs.email as person_email FROM license_granted as l INNER JOIN licenses as li ON li.id = l.license_id INNER JOIN litigations as lead ON lead.serial_number = li.serial_number INNER JOIN customers as cs ON cs.id = l.customer_id WHERE l.customer_id IN (SELECT co.id FROM customers as co WHERE co.company_id=?)  ORDER BY l.id DESC";
+							$transactionStmt = $this->db->prepare($query);
+							$transactionStmt->execute([$getUserInfo->company_id]);
+							$list = array();
+							if($transactionStmt->rowCount()>0){
+								while($data = $transactionStmt->fetch()){
+									$type_name = '';
+									switch((int)$data->doc_type){
+										case 0:								
+										case 1:
+											$type_name = 'Request to Participate';
+										break;
+										case 2:
+											$type_name = 'Non-Exclusive License';
+										break;
+										case 3:
+											$type_name = 'Strategic License';
+										break;
+										case 4:
+											$type_name = 'Proof Of Payment';
+										break;
+										case 5:
+											$type_name = 'Payment Notice';
+										break;
+									}
+									$data->type_name = $type_name;
+									$proof_of_payment = $data->proof_of_payment;
+									if($proof_of_payment!=""){
+										$proof_of_payment = str_replace('view?usp=drivesdk','preview',$proof_of_payment);
+										$proof_of_payment = str_replace('edit?usp=drivesdk','preview',$proof_of_payment);
+									}			
+									$data->proof_of_payment = $proof_of_payment;
+									$execute_agreement = $data->execute_agreement;
+									if($execute_agreement!=""){
+										$execute_agreement = str_replace('view?usp=drivesdk','preview',$execute_agreement);
+										$execute_agreement = str_replace('edit?usp=drivesdk','preview',$execute_agreement);
+									}			
+									$data->execute_agreement = $execute_agreement;
+									if($data->amount!='0.000'){
+										$data->amount = round($data->amount, 3,PHP_ROUND_HALF_UP);
+									} else {
+										$data->amount = '';
+									}
+									if($data->company_id>0){
+										/*Find company name */
+										$getCompanyData = DataController::getCompanyInfo($data->company_id);
+										if(count($getCompanyData)>0){
+											$data->license_company = $getCompanyData->company_name;
+										}				
+									}
+									$data->create_date = date('M, d y',strtotime($data->create_date));
+									array_push($list,$data);
+								}
+							}
+							$returnData['data']['granted'] = $list;
+							$list = array();
+							if($getUserInfo->demo==0){
+								$queryDemo = "SELECT c.lead_id,c.type,c.amount,c.executed_date,c.file,c.file_name,c.file_type,c.user_send, lead.lead_name,lead.serial_number,cs.email as person_email FROM demo_request_to_participates as c INNER JOIN litigations as lead ON lead.id = c.lead_id INNER JOIN customers as cs ON cs.id = c.customer_id ORDER BY c.id DESC";
+								$demoStmt = $this->db->prepare($queryDemo);
+								$demoStmt->execute();
+								if($demoStmt->rowCount()>0){
+									while($data = $demoStmt->fetch()){
+										$type_name = '';
+										switch((int)$data->type){
+											case 0:								
+											case 1:
+												$type_name = 'Request to Participate';
+											break;
+											case 2:
+												$type_name = 'Non-Exclusive License';
+											break;
+											case 3:
+												$type_name = 'Strategic License';
+											break;
+											case 4:
+												$type_name = 'Proof Of Payment';
+											break;
+											case 5:
+												$type_name = 'Payment Notice';
+											break;
+										}
+										$data->type_name = $type_name;
+										$file = $data->file;
+										$file = str_replace('view?usp=drivesdk','preview',$file);
+										$file = str_replace('edit?usp=drivesdk','preview',$file);
+										$data->file = $file;
+										$data->amount = '';
+										$data->date = date('M, d y',strtotime($data->executed_date));
+										array_push($list,$data);
+									}
+								}
+							}
+							$returnData['data']['demo'] = $list;
+							$newFooter = (object)array('id'=>'','lead_id'=>'','type'=>'','amount'=>'','date'=>'','file'=>'','file_type'=>0,'user_send'=>0,'lead_name'=>'','serial_number'=>'','person_email'=>'','type_name'=>'Total:','file_name'=>'Total:'); 
+							$returnData['data']['footer'] = $newFooter;
+						} else {
+							$returnData['status'] = 200;
+							$returnData['error_code'] = "998";
+							$returnData['message'] = "User blocked. Contact SynPat customer relations by phone or at customers@synpat.com.";
+						}
+					} else {
+						$returnData['status'] = 200;
+						$returnData['error_code'] = "102";
+						$returnData['message'] = "Token Expired";
+					}
+				}catch(\Exception $e){						
+					$this->logger->addInfo($e->getMessage());
+					$returnData['status'] = 200;
+					$returnData['error_code'] = "102";
+					$returnData['message'] = "Token Expired";
+				}
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "999";
+				$returnData['message'] = "Invalid token, Login again.";
+			}			
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* Customer Deal flow 
+	* return list of licenses customer is dealing with
+	*/
+	
+	public function user_deal_flow($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		$errorPersonalInfo = "";
+		$successPersonalInfo = "";
+		try{
+			$headers = $req->getHeaders();
+			$auth = $headers['HTTP_AUTHORIZATION'];
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){
+				$key = $this->get('settings')['docket-key'];
+				try{
+					$decodeToken = JWT::decode($auth[0], $key, array('HS256'));
+					if(count($decodeToken)>0 && isset($decodeToken->context->user) && count($decodeToken->context->user)>0){
+						$getUserInfo = DataController::getUserInfo($decodeToken->context->user->user_id);
+						if(count($getUserInfo)>0){
+							/**/
+							$query = "SELECT c.license_type,c.lead_id,c.available_for,c.customize_file,c.customize_filename,c.agreement_status,c.syndication,c.syndication_filename,c.availability,c.executed_by_synpat,c.synpat_filename,c.executed_by_customer,c.customer_filename,c.created_date,c.modified_date,c.user_send, lead.lead_name,lead.serial_number FROM customer_deal_flow as c INNER JOIN litigations as lead ON lead.id = c.lead_id INNER JOIN customers as cs ON cs.id = c.customer_id WHERE c.customer_id IN (SELECT co.id FROM customers as co WHERE co.company_id=?) ORDER BY c.id DESC";
+							$dealStmt = $this->db->prepare($query);
+							$dealStmt->execute([$getUserInfo->company_id]);
+							if($dealStmt->rowCount()>0){
+								$list = array();
+								$customerCompanyName = DataController::getCompanyInfo($getUserInfo->company_id);
+								while($data = $dealStmt->fetch()){
+									$data->customer_name = $customerCompanyName->company_name;
+									if($data->agreement_status==2){
+										$file = $data->customize_file;
+										$file = str_replace('view?usp=drivesdk','preview',$file);
+										$file = str_replace('edit?usp=drivesdk','preview',$file);			
+										$data->customize_file = $file;
+									}
+									if(!empty($data->syndication)){
+										$file = $data->syndication;
+										$file = str_replace('view?usp=drivesdk','preview',$file);
+										$file = str_replace('edit?usp=drivesdk','preview',$file);			
+										$data->syndication = $file;
+									}
+									if(!empty($data->executed_by_synpat)){
+										$file = $data->executed_by_synpat;
+										$file = str_replace('view?usp=drivesdk','preview',$file);
+										$file = str_replace('edit?usp=drivesdk','preview',$file);			
+										$data->executed_by_synpat = $file;
+									}
+									if(!empty($data->executed_by_customer)){
+										$file = $data->executed_by_customer;
+										$file = str_replace('view?usp=drivesdk','preview',$file);
+										$file = str_replace('edit?usp=drivesdk','preview',$file);			
+										$data->executed_by_customer = $file;
+									}
+									array_push($list,$data);
+								}
+								$returnData['data'] = $list;
+							}
+						} else {
+							$returnData['status'] = 200;
+							$returnData['error_code'] = "998";
+							$returnData['message'] = "User blocked. Contact SynPat customer relations by phone or at customers@synpat.com.";
+						}
+					} else {
+						$returnData['status'] = 200;
+						$returnData['error_code'] = "102";
+						$returnData['message'] = "Token Expired.";
+					}
+				}catch(\Exception $e){						
+					$this->logger->addInfo($e->getMessage());
+					$returnData['status'] = 200;
+					$returnData['error_code'] = "102";
+					$returnData['message'] = "Token Expired";
+				}
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "102";
+				$returnData['message'] = "Token Expired.";
+			}			
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* Portfolio Detail 
+	* return detail of portfolio
+	*/
+	
+	public function portfolio_info($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		$errorPersonalInfo = "";
+		$successPersonalInfo = "";
+		try{
+			$headers = $req->getHeaders();
+			$auth = $headers['HTTP_AUTHORIZATION'];
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){
+				$key = $this->get('settings')['docket-key'];
+				try{
+					$decodeToken = JWT::decode($auth[0], $key, array('HS256'));
+					if(count($decodeToken)>0 && isset($decodeToken->context->user) && count($decodeToken->context->user)>0){
+						$getUserInfo = DataController::getUserInfo($decodeToken->context->user->user_id);
+						if(count($getUserInfo)>0){
+							$portfolioNumber = $req->getAttribute('portfolio_number');
+							$queryPortfolio = "SELECT id FROM licenses WHERE serial_number=?";
+							$portfolioStmt = $this->db->prepare($queryPortfolio);
+							$portfolioStmt->execute([$portfolioNumber]);
+							if($portfolioStmt->rowCount()>0){
+								$getLicenseData = $portfolioStmt->fetch();
+								$queryData = "SELECT a.purchase_license,a.purchase_buy,a.strategic_license_agreement,active_button,l.lead_name,l.id as leadID,l.folder_id as folder_id FROM licenses as a INNER JOIN litigations as l ON l.serial_number = a.serial_number WHERE l.serial_number = ?";
+								$infoStmt = $this->db->prepare($queryData);
+								$infoStmt->execute([$portfolioNumber]);
+								if($infoStmt->rowCount()>0){
+									$data = array();
+									$getFilesData = $infoStmt->fetch();
+									$pla = DataController::fileReplaceToView($getFilesData->purchase_license);
+									$rtp = DataController::fileReplaceToView($getFilesData->purchase_buy);
+									$sla = DataController::fileReplaceToView($getFilesData->strategic_license_agreement);
+									$rtpd = DataController::fileReplaceToExport($getFilesData->purchase_buy,'&exportFormat=pdf');
+									$data['files'] = array('pla'=>$pla,'rtp'=>$rtp,'sla'=>$sla,'rtpd'=>$rtpd);
+									$data['message'] = $getFilesData->lead_name;
+									$data['session_no'] = $getFilesData->leadID;
+									$data['cookie_no'] = $getLicenseData->id;
+									$data['folder_id'] = $getFilesData->folder_id;
+									$data['active'] = $getFilesData->active_button;
+									$download = array();
+									$queryExecuted = "SELECT file,file_name FROM pos_agreements WHERE customer_id IN ( SELECT id FROM customers WHERE company_id=?)";
+									$executedStmt = $this->db->prepare($queryExecuted);
+									$executedStmt->execute([$getUserInfo->company_id]);
+									if($executedStmt->rowCount()>0){
+										while($file = $executedStmt->fetch()){
+											$download[] = array('file'=>DataController::fileReplaceToView($file->file),'name'=>$file->file_name,'download'=>DataController::fileReplaceToExport($file->file,'&exportFormat=pdf'));
+										}
+									}
+									$data['executed_files'] = $download;
+									$queryPendingPayments = "SELECT a.type as action_type,a.doc_type as license,a.id as fileNo ,target.company_name as target FROM potential_participates as a LEFT JOIN company as target ON target.id = a.company_id WHERE a.status=3 AND a.license_id=? AND a.customer_id IN (SELECT id FROM customers WHERE company_id=?)";
+									$pendingPayments = $this->db->prepare($queryPendingPayments);
+									$pendingPayments->execute([$getLicenseData->id,$getUserInfo->company_id]);
+									$pendingPaymentList = array();
+									if($pendingPayments->rowCount()>0){
+										while($row = $pendingPayments->fetch()){
+											array_push($pendingPaymentList,$row);
+										}
+									}
+									$data['pending_payments'] = $pendingPaymentList;
+									$returnData['data'] = $data;
+								} else {
+									$returnData['status'] = 200;
+									$returnData['error_code'] = "997";
+									$returnData['message'] = "Not a valid number.";
+								}
+							} else {
+								$returnData['status'] = 200;
+								$returnData['error_code'] = "997";
+								$returnData['message'] = "Not a valid number.";
+							}
+						} else {
+							$returnData['status'] = 200;
+							$returnData['error_code'] = "998";
+							$returnData['message'] = "User blocked. Contact SynPat customer relations by phone or at customers@synpat.com.";
+						}
+					} else {
+						$returnData['status'] = 200;
+						$returnData['error_code'] = "102";
+						$returnData['message'] = "Token Expired.";
+					}
+				}catch(\Exception $e){						
+					$this->logger->addInfo($e->getMessage());
+					$returnData['status'] = 200;
+					$returnData['error_code'] = "102";
+					$returnData['message'] = "Token Expired";
+				}
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "102";
+				$returnData['message'] = "Token Expired.";
+			}			
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	* Demo Portfolio List
+	*
+	*/
+	public function demo_portfolio_list($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$listShow = false;
+			$getUserInfo = array();
+			$headers = $req->getHeaders();
+			$auth = $headers['HTTP_AUTHORIZATION'];
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){								
+				$key = $this->get('settings')['docket-key'];
+				try{
+					$decodeToken = JWT::decode($auth[0], $key, array('HS256'));
+					if(count($decodeToken)>0 && isset($decodeToken->context->user) && count($decodeToken->context->user)>0){
+						$getUserInfo = DataController::getUserInfo($decodeToken->context->user->user_id);
+						if(count($getUserInfo)>0){
+							$listShow = true;
+						}
+					}
+				}catch(\Exception $e){						
+					$this->logger->addInfo($e->getMessage());
+					$returnData['status'] = 200;
+					$returnData['error_code'] = "102";
+					$returnData['message'] = "Token Expired";
+				}
+			}
+			$productList = array();
+			if($listShow===true){
+				/*Customer is logged in*/				
+				$portfolioQuery = "SELECT a.store_name,a.option_expiration_data,a.seller_asking_price,a.category,a.active_button,a.potential_participants,a.final_participants,a.regular_license_starts,a.late_license_starts,a.store,a.cost_price,li.file_left,li.file_middle,li.file_right,li.file_four,li.file_five,li.file_six,li.file_seven,li.file_eight,li.file_nine,li.file_ten,li.file_eleven,li.file_twelve,li.file_thirteen,li.file_fourteen,li.file_fiveteen,li.file_sixteen,li.file_sixteen,l.lead_name,l.serial_number,li.id as licenseID FROM acquisition as a LEFT JOIN litigations as l ON l.id=a.lead_id LEFT JOIN licenses as li ON li.serial_number=l.serial_number WHERE l.serial_number IN (?,?,?,?) AND l.status IN ('0','1','2')";
+				$portfolioStmt = $this->db->prepare($portfolioQuery);
+				$portfolioStmt->execute([73182,72101,22232,85865]);
+				if($portfolioStmt->rowCount()>0){
+					while($row = $portfolioStmt->fetch()){
+						$rowData = $row;
+						$images = array();
+						if($rowData->file_left!=""){
+							array_push($images,$rowData->file_left);
+						}
+						unset($rowData->file_left);
+						if($rowData->file_middle!=""){
+							array_push($images,$rowData->file_middle);
+						}
+						unset($rowData->file_middle);
+						if($rowData->file_right!=""){
+							array_push($images,$rowData->file_right);
+						}
+						unset($rowData->file_right);
+						if($rowData->file_four!=""){
+							array_push($images,$rowData->file_four);
+						}
+						unset($rowData->file_four);
+						if($rowData->file_five!=""){
+							array_push($images,$rowData->file_five);
+						}
+						unset($rowData->file_five);
+						if($rowData->file_six!=""){
+							array_push($images,$rowData->file_six);
+						}
+						unset($rowData->file_six);
+						if($rowData->file_seven!=""){
+							array_push($images,$rowData->file_seven);
+						}
+						unset($rowData->file_seven);
+						if($rowData->file_eight!=""){
+							array_push($images,$rowData->file_eight);
+						}
+						unset($rowData->file_eight);
+						if($rowData->file_nine!=""){
+							array_push($images,$rowData->file_nine);
+						}
+						unset($rowData->file_nine);
+						if($rowData->file_ten!=""){
+							array_push($images,$rowData->file_ten);
+						}
+						unset($rowData->file_ten);
+						if($rowData->file_eleven!=""){
+							array_push($images,$rowData->file_eleven);
+						}
+						unset($rowData->file_eleven);
+						if($rowData->file_twelve!=""){
+							array_push($images,$rowData->file_twelve);
+						}
+						unset($rowData->file_twelve);
+						if($rowData->file_thirteen!=""){
+							array_push($images,$rowData->file_thirteen);
+						}
+						unset($rowData->file_thirteen);
+						if($rowData->file_fourteen!=""){
+							array_push($images,$rowData->file_fourteen);
+						}
+						unset($rowData->file_fourteen);
+						if($rowData->file_fiveteen!=""){
+							array_push($images,$rowData->file_fiveteen);
+						}
+						unset($rowData->file_fiveteen);
+						if($rowData->file_sixteen!=""){
+							array_push($images,$rowData->file_sixteen);
+						}
+						unset($rowData->file_sixteen);
+						$rowData->images = $images;
+						$todayDate = strtotime(date('Y-m-d',strtotime('now')));
+						$expirationDate = strtotime($rowData->option_expiration_data);
+						$regularLicense = strtotime($rowData->regular_license_starts);
+						$lateLicense = strtotime($rowData->late_license_starts);
+						if(($rowData->option_expiration_data!='0000-00-00 00:00:00' && $expirationDate>$todayDate && $rowData->regular_license_starts=='0000-00-00 00:00:00') || (int)$rowData->cost_price==0){
+							if($rowData->active_button!='1'){
+								$rowData->active_button = 1;
+								/*UpdateData*/
+								DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('active_button'=>$rowData->active_button));
+								DataController::updateData('licenses',array('serial_number'=>$row->serial_number),array('active_button'=>$rowData->active_button));
+							}
+						} else if($rowData->cost_price>0 && $rowData->regular_license_starts!='0000-00-00 00:00:00'){
+							if($rowData->late_license_starts=='0000-00-00 00:00:00'){
+								/*echo "1";*/
+								$lateLicense = date('m/d/Y',strtotime('+4 months',$regularLicense));
+								$rowData->late_license_starts = date('Y-m-d H:i:s',strtotime($lateLicense));
+								DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('late_license_starts'=>$rowData->late_license_starts,'active_button'=>$rowData->active_button));
+							} 
+							if($todayDate>$regularLicense && $todayDate<$lateLicense ){
+								/*echo "2";*/
+								if($rowData->active_button!=2){
+									$rowData->active_button = 2;
+									DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('active_button'=>$rowData->active_button));
+									$this->updateLicenseDataBySerialNumber('licenses',array('serial_number'=>$row->serial_number),array('active_button'=>$rowData->active_button));
+								}
+							} else if($todayDate>$regularLicense && $todayDate>=$lateLicense){
+								/*echo "3";*/
+								if($rowData->active_button!=3){
+									$rowData->active_button = 3;
+									DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('active_button'=>$rowData->active_button));
+									$this->updateLicenseDataBySerialNumber('licenses',array('serial_number'=>$row->serial_number),array('active_button'=>$rowData->active_button));
+								}						
+							}					
+						}
+						array_push($productList, $rowData);
+					}
+				}
+				$returnData['status'] = 200;
+				$returnData['data'] = array('portfolio_list'=>$productList);
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "101";
+				$returnData['message'] = "Invalid input";
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	/**
+	*
+	* Portfolios List
+	*/
+	public function portfolio_list($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		try{
+			$invitation = $req->getAttribute('invitation');
+			$getCategory = $req->getAttribute('category');
+			$listShow = false;
+			$getUserInfo = array();
+			if($invitation>0){
+				$listShow = true;
+			} else {
+				$headers = $req->getHeaders();
+				$auth = $headers['HTTP_AUTHORIZATION'];
+				$checkAuthorization = false;
+				if(isset($auth[0]) && $auth[0]!=""){
+					$checkAuthorization = DataController::checkToken($auth[0]);
+				}
+				if($checkAuthorization===true){								
+					$key = $this->get('settings')['docket-key'];
+					try{
+						$decodeToken = JWT::decode($auth[0], $key, array('HS256'));
+						if(count($decodeToken)>0 && isset($decodeToken->context->user) && count($decodeToken->context->user)>0){
+							$getUserInfo = DataController::getUserInfo($decodeToken->context->user->user_id);
+							if(count($getUserInfo)>0){
+								$listShow = true;
+							}
+						}
+					}catch(\Exception $e){						
+						$this->logger->addInfo($e->getMessage());
+						$returnData['status'] = 200;
+						$returnData['error_code'] = "102";
+						$returnData['message'] = "Token Expired";
+					}
+				}
+			}
+			$productList = array();
+			$invitationProduct= array();
+			if($listShow===true){
+				/*Customer is logged in or comes from invitation link*/
+				$category = 0;
+				if(isset($getCategory) && $getCategory!=""){
+					$cat = explode('-',$getCategory);
+					if(count($cat)==2){
+						$category = (int)$cat[1];
+					}
+				}
+				if($category>0){
+					$portfolioQuery = "SELECT a.store_name,a.option_expiration_data,a.seller_asking_price,a.category,a.active_button,a.potential_participants,a.final_participants,a.regular_license_starts,a.late_license_starts,a.store,a.cost_price,li.file_left,li.file_middle,li.file_right,li.file_four,li.file_five,li.file_six,li.file_seven,li.file_eight,li.file_nine,li.file_ten,li.file_eleven,li.file_twelve,li.file_thirteen,li.file_fourteen,li.file_fiveteen,li.file_sixteen,li.file_sixteen,l.lead_name,l.serial_number,c.name as categoryName, li.id as licenseID FROM acquisition as a LEFT JOIN litigations as l ON l.id=a.lead_id LEFT JOIN licenses as li ON li.serial_number = l.serial_number  LEFT JOIN category as c ON c.id=a.category WHERE a.category=? AND l.status IN ('0','1','2')";
+					$portfolioStmt = $this->db->prepare($portfolioQuery);
+					$portfolioStmt->execute([$category]);
+					if($portfolioStmt->rowCount()>0){
+						while($row = $portfolioStmt->fetch()){
+							$rowData = $row;
+							$images = array();
+							if($rowData->file_left!=""){
+								array_push($images,$rowData->file_left);
+							}
+							unset($rowData->file_left);
+							if($rowData->file_middle!=""){
+								array_push($images,$rowData->file_middle);
+							}
+							unset($rowData->file_middle);
+							if($rowData->file_right!=""){
+								array_push($images,$rowData->file_right);
+							}
+							unset($rowData->file_right);
+							if($rowData->file_four!=""){
+								array_push($images,$rowData->file_four);
+							}
+							unset($rowData->file_four);
+							if($rowData->file_five!=""){
+								array_push($images,$rowData->file_five);
+							}
+							unset($rowData->file_five);
+							if($rowData->file_six!=""){
+								array_push($images,$rowData->file_six);
+							}
+							unset($rowData->file_six);
+							if($rowData->file_seven!=""){
+								array_push($images,$rowData->file_seven);
+							}
+							unset($rowData->file_seven);
+							if($rowData->file_eight!=""){
+								array_push($images,$rowData->file_eight);
+							}
+							unset($rowData->file_eight);
+							if($rowData->file_nine!=""){
+								array_push($images,$rowData->file_nine);
+							}
+							unset($rowData->file_nine);
+							if($rowData->file_ten!=""){
+								array_push($images,$rowData->file_ten);
+							}
+							unset($rowData->file_ten);
+							if($rowData->file_eleven!=""){
+								array_push($images,$rowData->file_eleven);
+							}
+							unset($rowData->file_eleven);
+							if($rowData->file_twelve!=""){
+								array_push($images,$rowData->file_twelve);
+							}
+							unset($rowData->file_twelve);
+							if($rowData->file_thirteen!=""){
+								array_push($images,$rowData->file_thirteen);
+							}
+							unset($rowData->file_thirteen);
+							if($rowData->file_fourteen!=""){
+								array_push($images,$rowData->file_fourteen);
+							}
+							unset($rowData->file_fourteen);
+							if($rowData->file_fiveteen!=""){
+								array_push($images,$rowData->file_fiveteen);
+							}
+							unset($rowData->file_fiveteen);
+							if($rowData->file_sixteen!=""){
+								array_push($images,$rowData->file_sixteen);
+							}
+							unset($rowData->file_sixteen);
+							$rowData->images = $images;
+							$todayDate = strtotime(date('Y-m-d',strtotime('now')));
+							$expirationDate = strtotime($rowData->option_expiration_data);
+							$regularLicense = strtotime($rowData->regular_license_starts);
+							$lateLicense = strtotime($rowData->late_license_starts);
+							if(($rowData->option_expiration_data!='0000-00-00 00:00:00' && $expirationDate>$todayDate && $rowData->regular_license_starts=='0000-00-00 00:00:00') || (int)$rowData->cost_price==0){
+								if($rowData->active_button!='1'){
+									$rowData->active_button = 1;
+									/*UpdateData*/
+									DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('active_button'=>$rowData->active_button));
+									DataController::updateData('licenses',array('serial_number'=>$row->serial_number),array('active_button'=>$rowData->active_button));
+								}
+							} else if($rowData->cost_price>0 && $rowData->regular_license_starts!='0000-00-00 00:00:00'){
+								if($rowData->late_license_starts=='0000-00-00 00:00:00'){
+									/*echo "1";*/
+									$lateLicense = date('m/d/Y',strtotime('+4 months',$regularLicense));
+									$rowData->late_license_starts = date('Y-m-d H:i:s',strtotime($lateLicense));
+									DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('late_license_starts'=>$rowData->late_license_starts,'active_button'=>$rowData->active_button));
+								} 
+								if($todayDate>$regularLicense && $todayDate<$lateLicense ){
+									/*echo "2";*/
+									if($rowData->active_button!=2){
+										$rowData->active_button = 2;
+										DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('active_button'=>$rowData->active_button));
+										$this->updateLicenseDataBySerialNumber('licenses',array('serial_number'=>$row->serial_number),array('active_button'=>$rowData->active_button));
+									}
+								} else if($todayDate>$regularLicense && $todayDate>=$lateLicense){
+									/*echo "3";*/
+									if($rowData->active_button!=3){
+										$rowData->active_button = 3;
+										DataController::updateData('acquisition',array('lead_id'=>$row->lead_id),array('active_button'=>$rowData->active_button));
+										$this->updateLicenseDataBySerialNumber('licenses',array('serial_number'=>$row->serial_number),array('active_button'=>$rowData->active_button));
+									}						
+								}					
+							}
+							array_push($productList, $rowData);
+						}
+					}
+				}
+				/*Invitation*/				
+				if($invitation>0){
+					$invitationQuery = "SELECT a.store_name,a.option_expiration_data,a.seller_asking_price,a.category,a.active_button,a.potential_participants,a.final_participants,a.regular_license_starts,a.late_license_starts,a.store,a.cost_price,li.file_left,li.file_middle,li.file_right,li.file_four,li.file_five,li.file_six,li.file_seven,li.file_eight,li.file_nine,li.file_ten,li.file_eleven,li.file_twelve,li.file_thirteen,li.file_fourteen,li.file_fiveteen,li.file_sixteen,li.file_sixteen,l.lead_name,l.serial_number,li.id as licenseID FROM acquisition as a LEFT JOIN litigations as l ON l.id=a.lead_id LEFT JOIN licenses as li ON l.serial_number=li.serial_number WHERE l.serial_number=? AND l.status IN ('0','1','2')";
+					$invitationStmt = $this->db->prepare($invitationQuery);
+					$invitationStmt->execute([$invitation]);
+					if($invitationStmt->rowCount()>0){
+						$rowData = $invitationStmt->fetch();
+						$images = array();
+						if($rowData->file_left!=""){
+							array_push($images,$rowData->file_left);
+						}
+						unset($rowData->file_left);
+						if($rowData->file_middle!=""){
+							array_push($images,$rowData->file_middle);
+						}
+						unset($rowData->file_middle);
+						if($rowData->file_right!=""){
+							array_push($images,$rowData->file_right);
+						}
+						unset($rowData->file_right);
+						if($rowData->file_four!=""){
+							array_push($images,$rowData->file_four);
+						}
+						unset($rowData->file_four);
+						if($rowData->file_five!=""){
+							array_push($images,$rowData->file_five);
+						}
+						unset($rowData->file_five);
+						if($rowData->file_six!=""){
+							array_push($images,$rowData->file_six);
+						}
+						unset($rowData->file_six);
+						if($rowData->file_seven!=""){
+							array_push($images,$rowData->file_seven);
+						}
+						unset($rowData->file_seven);
+						if($rowData->file_eight!=""){
+							array_push($images,$rowData->file_eight);
+						}
+						unset($rowData->file_eight);
+						if($rowData->file_nine!=""){
+							array_push($images,$rowData->file_nine);
+						}
+						unset($rowData->file_nine);
+						if($rowData->file_ten!=""){
+							array_push($images,$rowData->file_ten);
+						}
+						unset($rowData->file_ten);
+						if($rowData->file_eleven!=""){
+							array_push($images,$rowData->file_eleven);
+						}
+						unset($rowData->file_eleven);
+						if($rowData->file_twelve!=""){
+							array_push($images,$rowData->file_twelve);
+						}
+						unset($rowData->file_twelve);
+						if($rowData->file_thirteen!=""){
+							array_push($images,$rowData->file_thirteen);
+						}
+						unset($rowData->file_thirteen);
+						if($rowData->file_fourteen!=""){
+							array_push($images,$rowData->file_fourteen);
+						}
+						unset($rowData->file_fourteen);
+						if($rowData->file_fiveteen!=""){
+							array_push($images,$rowData->file_fiveteen);
+						}
+						unset($rowData->file_fiveteen);
+						if($rowData->file_sixteen!=""){
+							array_push($images,$rowData->file_sixteen);
+						}
+						unset($rowData->file_sixteen);
+						$rowData->images = $images;
+						$todayDate = strtotime(date('Y-m-d',strtotime('now')));
+						$expirationDate = strtotime($rowData->option_expiration_data);
+						$regularLicense = strtotime($rowData->regular_license_starts);
+						$lateLicense = strtotime($rowData->late_license_starts);
+						if(($rowData->option_expiration_data!='0000-00-00 00:00:00' && $expirationDate>$todayDate && $rowData->regular_license_starts=='0000-00-00 00:00:00') || $rowData->cost_price==0.0){
+							if($rowData->active_button!='1'){
+								$rowData->active_button = 1;
+								/*UpdateData*/
+								DataController::updateData('acquisition',array('lead_id'=>$rowData->lead_id),array('active_button'=>$rowData->active_button));
+								DataController::updateData('licenses',array('serial_number'=>$rowData->serial_number),array('active_button'=>$rowData->active_button));
+							}
+						} else if($rowData->cost_price>0 && $rowData->regular_license_starts!='0000-00-00 00:00:00'){
+							if($rowData->late_license_starts=='0000-00-00 00:00:00'){
+								$lateLicense = date('m/d/Y',strtotime('+4 months',$regularLicense));
+								$rowData->late_license_starts = date('Y-m-d H:i:s',strtotime($lateLicense));
+								$rowData->active_button = 2;
+								/*UpdateData*/
+								DataController::updateData('acquisition',array('lead_id'=>$rowData->lead_id),array('active_button'=>$rowData->active_button,'late_license_starts'=>$rowData->late_license_starts));
+								DataController::updateData('licenses',array('serial_number'=>$rowData->serial_number),array('active_button'=>$rowData->active_button));
+							} else {
+								if($todayDate>$regularLicense && $todayDate<$lateLicense && $rowData->active_button!='2'){
+									$rowData->active_button = 2;
+									/*UpdateData*/
+									DataController::updateData('acquisition',array('lead_id'=>$rowData->lead_id),array('active_button'=>$rowData->active_button));
+									DataController::updateData('licenses',array('serial_number'=>$rowData->serial_number),array('active_button'=>$rowData->active_button));
+								} else if($todayDate>$regularLicense && $todayDate>=$lateLicense && $rowData->active_button!='3'){
+									$rowData->active_button = 3;
+									/*UpdateData*/
+									DataController::updateData('acquisition',array('lead_id'=>$rowData->lead_id),array('active_button'=>$rowData->active_button));
+									DataController::updateData('licenses',array('serial_number'=>$rowData->serial_number),array('active_button'=>$rowData->active_button));
+								}
+							}
+						}
+					}
+					$invitationProduct= $rowData;
+				}
+				$returnData['status'] = 200;
+				$returnData['data'] = array('portfolio_list'=>$productList,'invitation_portfolio'=>$invitationProduct);
+			} else {
+				$returnData['status'] = 200;
+				$returnData['error_code'] = "101";
+				$returnData['message'] = "Invalid input";
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData['status'] = 500;
+			$returnData['error_code'] = "100";
+			$returnData['message'] = "Internal server error";
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	
+	private function fileReplaceToExport($file,$format){
+		$file = str_replace('/edit?usp=drivesdk',$format,$file);
+		$file = str_replace('/view?usp=drivesdk',$format,$file);
+		$file = str_replace('/edit',$format,$file);
+		$file = str_replace('/view',$format,$file);
+		$file = str_replace('https://docs.google.com/document/d/','https://docs.google.com/feeds/download/documents/export/Export?id=',$file);
+		return $file;
+	}
+
+	private function fileReplaceToView($file){
+		$file = str_replace('/edit?usp=drivesdk','/preview',$file);
+		$file = str_replace('/view?usp=drivesdk','/preview',$file);
+		$file = str_replace('/edit','/preview',$file);
+		$file = str_replace('/view','/preview',$file);
+		return $file;
+	}
+	
+	
+	/**
+	*
+	* Company Information
+	*/
+	private function getCompanyInfo($companyID){
+		$queryCompanyName = "SELECT company_name FROM company where id=?";
+		$companyStmt = $this->db->prepare($queryCompanyName);
+		$companyStmt->execute($companyID);
+		$data = array();
+		if($companyStmt->rowCount()>0){
+			$data = $companyStmt->fetch();
+		}
+		return $data;
+	}
+	
+	/**
+	*
+	* Customer Information
+	*/
+	private function getUserInfo($customerID){
+		$query = "SELECT * FROM customers WHERE id=? AND status=0";
+		$userStmt = $this->db->prepare($query);
+		$userStmt->execute([$customerID]);
+		$data = array();
+		if($userStmt->rowCount()>0){
+			$data = $userStmt->fetch();
+		}
+		return $data;
+	}
+	
+	/**
+	* PotentialData
+	*
+	*/
+	private function checkPotentialData($licenseID,$companyID,$potentialRowID){
+		$data = array();
+		$query = "SELECT id,proof_of_payment,execute_agreement FROM potential_participates WHERE status=3 AND customer_id IN (SELECT id FROM customers WHERE company_id=?) AND license_id=? AND id=?";
+		$potentialStmt = $this->db->prepare($query);
+		$potentialStmt->execute([$companyID,$licenseID,$potentialRowID]);
+		if($potentialStmt->rowCount()>0){
+			$data = $potentialStmt->fetch();
+		}
+		return $data;
+	}
+	/**
+	* Check License
+	*/
+	private function checkLicense($licenseNumber){
+		$data = array();
+		if($licenseNumber!=""){
+			$queryLicense = "SELECT id FROM licenses WHERE license_number=?";
+			$licenseStmt = $this->db->prepare($queryLicense);
+			$licenseStmt->execute([$licenseNumber]);
+			if($licenseStmt->rowCount()>0){
+				$data = $licenseStmt->fetch();
+			}
+		}
+		return $data;
+	}
+	/**
+	*
+	* Check Google Captcha
+	*/
+	private function googleCaptcha($request){
+		$response=json_decode(file_get_contents("https://www.google.com/recaptcha/api/siteverify?secret=".CAPTCHA_SECRET_KEY."&response=".$request."&remoteip=".$_SERVER['REMOTE_ADDR']), true);
+		$dataResponse = false;
+		if(isset($response['success'])){
+			$dataResponse = $response['success'];
+		}
+		return $dataResponse;
+	}
+	/**
+	*	Insert new Customer request 
+	*
+	*/
+	
+	private function insertCustomerRequest($userData = array(),$type=0){
+		$returnData = array('id'=>0,'error'=>0,'verification'=>2,'message'=>'');
+		if(strlen(trim($userData['person_email']))==0 || strlen(trim('/^[a-zA-Z0-9]+$/i', $userData['person_name']))==0 || strlen(trim('/^[a-zA-Z0-9]+$/i', $userData['company_name']))==0 || strlen(trim($userData['password']))==0 || strlen(trim($userData['confirm_password']))==0){
+			$returnData['error'] = 1;
+			$returnData['verification'] = 2;
+			$returnData['message'] = "Some fields are empty";
+		} else if($userData['password'] == $userData['confirm_password']){			
+			$name = explode(" ",$userData[$registerUser]['person_name']);
+			if(!isset($name[1])){
+				$name[1] = "";
+			}
+			$customerFields = array('first_name'=>$name[0],'last_name'=>$name[1],'email'=>$userData['person_email'],'password'=>md5($userData['password']),'company_name'=>$userData['company_name'],'company_address'=>'','phone_number'=>$userData['person_phone'],'create_date'=>date('Y-m-d H:i:s'),'type'=>$type);
+			$returnData['id'] = DataController::insertData('customer_request',$customerFields);
+			if($returnData['id']>0){
+				$returnData['error'] = 0;
+				$returnData['message'] = "Request send";
+			}
+		} else {
+			$returnData['error'] = 1;
+			$returnData['verification'] = 2;
+			$returnData['message'] = "Password and confirm password not match.";
+		}
+		return $returnData;
+	}
+	
+	/**
+	* Customer Login
+	*/
+	
+	private function checkCustomerLogin($email,$password){
+		/*check from db*/
+		$checkUser = array();
+		$queryLogin = "SELECT id,first_name,last_name,email,company_id,contact_id,type , status FROM customers WHERE email=? AND password=?";
+		$loginStmt = $this->db->prepare($queryLogin);
+		$loginStmt->execute([$email,md5($password)]);
+		if($loginStmt->rowCount()>0){
+			$checkUser = $loginStmt->fetch();
+		}
+		return $checkUser;
+	}
+	
+	/*
+	* Create Agreement Draft file
+	*/
+	
+	private function createDraftFile($folderID,$fileURL,$companyName){		
+		$fileName = json_encode(array());
+		$sendFileData = array('file_id'=>$fileURL,'folder_id'=>$folderID,'company_name'=>$companyName);	
+		$url = DataController::getBackendUrl();
+		$ch = curl_init();
+		curl_setopt($ch, CURLOPT_URL,$url.'customers/draftFileInCustomer');
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_FOLLOWLOCATION, TRUE);
+		curl_setopt($ch, CURLOPT_POST, 1);
+		curl_setopt($ch, CURLOPT_SAFE_UPLOAD, false);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, $sendFileData);
+		$response = curl_exec($ch);		
+		if (!curl_errno($ch)) {
+			$fileName = $response;
+		}
+		curl_close ($ch);
+		return $fileName;
+	}
+	
+	/**
+	* Rename agreement draft file
+	*/
+	private function renameDraftFile($fileURL,$companyName){		
+		$fileName = json_encode(array());
+		$sendFileData = array('file_id'=>$fileURL,'company_name'=>$companyName);
+		$url = DataController::getBackendUrl();		
+		$ch = curl_init();
+		curl_setopt($ch, CURLOPT_URL,$url.'customers/renameDraftFileInCustomer');
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_FOLLOWLOCATION, TRUE);
+		curl_setopt($ch, CURLOPT_POST, 1);
+		curl_setopt($ch, CURLOPT_SAFE_UPLOAD, false);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, $sendFileData);
+		$response = curl_exec($ch);		
+		if (!curl_errno($ch)) {
+			$fileName = $response;
+		}
+		curl_close ($ch);
+		return $fileName;
+	}
+	
+	/**
+	* upload File
+	*/
+	
+	private function uploadFile($data){
+		$fileName = array();
+		$url = DataController::getBackendUrl();		
+		$ch = curl_init();
+		curl_setopt($ch, CURLOPT_URL,$url.'customers/store_file_upload');
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+		curl_setopt($ch, CURLOPT_FOLLOWLOCATION, TRUE);
+		curl_setopt($ch, CURLOPT_POST, 1);
+		curl_setopt($ch, CURLOPT_SAFE_UPLOAD, false);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+		$response = curl_exec($ch);
+		if (!curl_errno($ch)) {
+			try{
+				$response = json_decode($response,true);
+				$fileName = $response;
+			}catch(Exception $e){
+				
+			}			
+		}
+		return $fileName;
+	}
+	
+	/**
+	*	Companies
+	*	return list of companies based on search
+	*/
+	
+	public function search_companies($app,$req,$resp,$args = []){
+		$returnData = array('status'=>200,'message'=>'','data'=>array());
+		$headers = $req->getHeaders();
+		$auth = $headers['HTTP_AUTHORIZATION'];
+		try{
+			$checkAuthorization = false;
+			if(isset($auth[0]) && $auth[0]!=""){
+				$checkAuthorization = DataController::checkToken($auth[0]);
+			}
+			if($checkAuthorization===true){
+				$postData = $req->getParsedBody();
+				$searchString = "";
+				$sector = "";
+				$cat = "";
+				$subCat = "";
+				$tech = "";
+				$subTech = "";
+				$sort = "";
+				$sortBy = "";
+				$users = "";
+				$industry = "";
+				$company_size = "";
+				$no_of_size = "";
+				$label = "";
+				$specialist = "";
+				$filterLinkedIn = "";
+				$extend = false;
+				$start = 0;
+				$end = 500;
+				if(isset($postData['q'])){
+					$searchString = $postData['q'];
+				}
+				if(isset($postData['sector'])){
+					$sector = $postData['sector'];
+				}
+				if(isset($postData['category'])){
+					$cat = $postData['category'];
+				}
+				if(isset($postData['sub_category'])){
+					$subCat = $postData['sub_category'];
+				}
+				if(isset($postData['technology'])){
+					$tech = $postData['technology'];
+				}
+				if(isset($postData['sub_technology'])){
+					$subTech = $postData['sub_technology'];
+				}
+				if(isset($postData['sort_field'])){
+					$sort = $postData['sort_field'];
+				}
+				if(isset($postData['sort_by'])){
+					$sortBy = $postData['sort_by'];
+				}
+				if(isset($postData['users'])){
+					$users = $postData['users'];
+				}
+				if(isset($postData['industry'])){
+					$industry = $postData['industry'];
+				}
+				if(isset($postData['no_of_size'])){
+					$no_of_size = $postData['no_of_size'];
+				}
+				if(isset($postData['important'])){
+					$label = $postData['important'];
+				}
+				if(isset($postData['specialist'])){
+					$specialist = $postData['specialist'];
+				}
+				if(isset($postData['linkedin'])){
+					$filterLinkedIn = $postData['linkedin'];
+				}
+				if(isset($postData['offset'])){
+					$start = $postData['offset'];
+				}
+				if(isset($postData['end'])){
+					$end = $postData['end'];
+					if($end>500){
+						$end = 500;
+					}
+				}
+				if(isset($postData['extend'])){
+					$extend = $postData['extend'];
+				}
+				if(is_array($industry)){
+					$inds = array();
+					foreach($industry as $ind){
+						$inds[] = '"'.$ind.'"';
+					}
+					$industry = $inds;
+				} else {
+					$industry = array();
+				}
+				if(is_array($specialist)){
+					$specialities = array();
+					foreach($specialist as $spec){
+						$specialities[] = trim($spec);
+					}
+					$specialist = $specialities;
+				} else {
+					$specialist = array();
+				}
+				if(is_array($company_size)){
+					$cs = array();
+					foreach($company_size as $c){
+						$cs[] = '"'.$c.'"';
+					}
+					$company_size = $cs;
+				} else {
+					$company_size = array();
+				}
+				if(is_array($no_of_size)){					
+					$no_of_size = implode(',',$no_of_size);
+				} else {
+					$no_of_size = "";
+				}
+				if(is_array($sector)){
+					if(in_array('Unclassify',$sector)){
+						$sector = "Unclassify";
+					} else {
+						$sector = implode(',',$sector);
+					}					
+				} else {
+					$sector = "";
+				}
+				if(is_array($cat)){
+					$cat = implode(',',$cat);
+				} else {
+					$cat = "";
+				}
+				if(is_array($subCat)){
+					$subCat = implode(',',$subCat);
+				} else {
+					$subCat = "";
+				}	
+				if(is_array($tech)){
+					$tech = implode(',',$tech);
+				} else {
+					$tech = "";
+				}	
+				if(is_array($subTech)){
+					$subTech = implode(',',$subTech);
+				} else {
+					$subTech = "";
+				}	
+				if(is_array($users)){
+					$users = implode(',',$users);
+				} else {
+					$users = "";
+				}
+				if($sort==""){
+					$sort = 'c.company_name';
+				}
+				if($sortBy==""){
+					$sortBy = 'ASC';
+				}
+				$leadID = 0;
+				$activity = 0;
+				$invited = 2;
+				$data = DataController::companyOptimizeListWithPaging($searchString,$sector,$cat,$subCat,$tech,$subTech,$users,$filterLinkedIn,$industry,$company_size,$no_of_size,$label,$specialist,$sort,$sortBy,$start,$end,$leadID,$activity,$invited,$extend);
+				$returnData = array('status'=>200,'message'=>'','data'=>$data);
+			}
+		}catch(Exception $e){
+			$this->logger->addInfo($e->getMessage());
+			$returnData = array('status'=>500,'message'=>'Internal server error','error_code'=>500);
+		}
+		return $resp->withJson($returnData, $returnData['status']);
+	}
+	
+	private function companyOptimizeListWithPaging($search,$sector,$cat="",$subCat="",$tech="",$subTech="",$users="",$linkedin="",$industry=array(),$company_size=array(),$no_of_size="",$label="",$specialist=array(),$sort='c.company_name',$orderBy='ASC',$start,$end,$leadID = 0, $activity = 0,$invited = 2,$rs = false){
+		$data = array('count_all'=>0,'data'=>array());
+		$allCompanies = array();
+		$mainFilter = false;
+		if($leadID>0 && $activity>0 && $invited==0){			
+			if($activity==1){
+				$getLeadCompanyList = DataController::getSalesActivityCompaniesByLead($leadID);
+			} else if($activity==2){
+				$getLeadCompanyList = DataController::getAcquisitionActivityCompaniesByLead($leadID);
+			}
+			if(isset($getLeadCompanyList) && count($getLeadCompanyList)>0){
+				foreach($getLeadCompanyList as $c){
+					$allCompanies[] = $c->id;
+				}
+			}
+		}
+		if($linkedin!=""){
+			$mainFilter = true;
+			if(count($allCompanies)>0){
+				$allCompanies = array_unique($allCompanies);
+				$no_of_employees = explode(',',$linkedin);
+				$noOfEmployeesImplode = str_repeat ('?, ',  count ($no_of_employees) - 1) . '?';
+				$allCompaniesImplode = str_repeat ('?, ',  count ($allCompanies) - 1) . '?';
+				$queryLinkedin = "SELECT id FROM company WHERE no_of_employees IN ($noOfEmployeesImplode) AND id IN ($allCompaniesImplode)";
+				$linkedINStmt = $this->db->prepare($queryLinkedin);
+				$linkedINStmt->execute(array_merge($no_of_employees,$allCompanies));	
+			} else {
+				$no_of_employees = explode(',',$linkedin);
+				$noOfEmployeesImplode = str_repeat ('?, ',  count ($no_of_employees) - 1) . '?';
+				$queryLinkedin = "SELECT id FROM company WHERE no_of_employees IN ($noOfEmployeesImplode)";
+				$linkedINStmt = $this->db->prepare($queryLinkedin);
+				$linkedINStmt->execute($no_of_employees);
+			}
+			if(isset($linkedINStmt)){
+				$allCompanies = array();
+				if($linkedINStmt->rowCount()>0){
+					while($c = $linkedINStmt->fetch()){
+						array_push($allCompanies,$c->id);
+					}
+				}
+			}			
+		}
+		if($label=='0' || $label =='1'){
+			$mainFilter = true;
+			$listImportantCompanies = array();		
+			if(count($allCompanies)>0){
+				$allCompanies = array_unique($allCompanies);
+			}
+			if(count($allCompanies)>0){
+				$allCompaniesImplode = str_repeat ('?, ',  count ($allCompanies) - 1) . '?';
+				$queryImportantCompanies = "SELECT id FROM company WHERE id IN ($allCompaniesImplode) AND label=?";
+				$imptCompaniesStmt = $this->db->prepare($queryImportantCompanies);
+				$imptCompaniesStmt->execute(array_merge($allCompanies,array($label)));
+			} else {
+				$queryImportantCompanies = "SELECT id FROM company WHERE label=?";
+				$imptCompaniesStmt = $this->db->prepare($queryImportantCompanies);
+				$imptCompaniesStmt->execute([$label]);
+			}
+			if(isset($imptCompaniesStmt)){
+				$allCompanies = array();
+				if($imptCompaniesStmt->rowCount()>0){
+					while($c = $imptCompaniesStmt->fetch()){
+						array_push($allCompanies,$c->id);
+					}
+				}
+			}	
+		}
+		if(count($company_size)>0){
+			$mainFilter = true;
+			$listCompanySize = array();		
+			if(count($allCompanies)>0){
+				$allCompanies = array_unique($allCompanies);
+			}
+			if(count($allCompanies)>0){
+				$allCompaniesImplode = str_repeat ('?, ',  count ($allCompanies) - 1) . '?';
+			}
+			foreach($company_size as $cs){
+				if(count($allCompanies)>0){
+					$queryCompanySize = "SELECT id FROM company WHERE id IN ($allCompaniesImplode) AND company_size=?";
+					$companySizeStmt = $this->db->prepare($queryCompanySize);
+					$companySizeStmt->execute(array_merge($allCompanies,array($cs)));
+				} else {
+					$queryCompanySize = "SELECT id FROM company WHERE company_size=?";
+					$companySizeStmt = $this->db->prepare($queryCompanySize);
+					$companySizeStmt->execute([$cs]);
+				}
+				if(isset($companySizeStmt)){
+					if($companySizeStmt->rowCount()>0){
+						while($c = $companySizeStmt->fetch()){
+							array_push($listCompanySize,$c->id);
+						}
+					}
+				}
+			}
+			$allCompanies = array();
+			if(count($listCompanySize)>0){
+				$allCompanies = $listCompanySize;
+			}	
+		}
+		if(count($industry)>0){
+			$mainFilter = true;
+			$listIndustries = array();
+			if(count($allCompanies)>0){
+				$allCompanies = array_unique($allCompanies);
+			}
+			if(count($allCompanies)>0){
+				$allCompaniesImplode = str_repeat ('?, ',  count ($allCompanies) - 1) . '?';
+			}
+			foreach($industry as $ind){
+				if(count($allCompanies)>0){
+					$queryIndustry = "SELECT id FROM company WHERE id IN ($allCompaniesImplode) AND industry=?";
+					$industryStmt = $this->db->prepare($queryIndustry);
+					$industryStmt->execute(array_merge($allCompanies),array($ind));
+				} else {
+					$queryIndustry = "SELECT id FROM company WHERE industry=?";
+					$industryStmt = $this->db->prepare($queryIndustry);
+					$industryStmt->execute([$ind]);
+				}
+				if(isset($industryStmt) && $industryStmt->rowCount()>0){
+					while($c = $industryStmt->fetch()){
+						array_push($listIndustries,$c->id);
+					}
+				}
+			}
+			$allCompanies = array();
+			if(count($listIndustries)>0){
+				$allCompanies = $listIndustries;
+			}
+		}
+		if(count($specialist)>0){
+			$mainFilter = true;
+			if(count($allCompanies)>0){
+				$allCompanies = array_unique($allCompanies);
+			}
+			$whereS = "";
+			foreach($specialist as $spec){
+				$whereS .="specialties LIKE '%".$spec."%' OR ";
+			}
+			$whereS = substr($whereS,0,-3);
+			$queryS = "SELECT id FROM company WHERE ";
+			if(count($allCompanies)>0){
+				$queryS .= " id IN (".implode(',',$allCompanies).") AND ";
+			}
+			$queryS .= " (" .$whereS. ") ";
+			try{
+				$resultS = $this->db->prepare($queryS);
+				$resultS->execute();
+				if($resultS->rowCount()>0){
+					$allCompanies = array();
+					while($c = $resultS->fetch()){
+						array_push($allCompanies,$c->id);
+					}
+				}
+			}catch(Exception $e){
+				
+			}
+		}
+		if($no_of_size!=""){
+			$mainFilter = true;
+			if(count($allCompanies)>0){
+				$allCompanies = array_unique($allCompanies);
+				$queryEmployeeSize = "SELECT id FROM company WHERE no_of_employees IN (".$no_of_size.") AND id IN (".implode(',',$allCompanies).")";
+			} else {
+				$queryEmployeeSize = "SELECT id FROM company WHERE no_of_employees IN (".$no_of_size.")";
+			}
+			$queryEmployeeSizeResult = $this->db->prepare($queryEmployeeSize);
+			$queryEmployeeSizeResult->execute();
+			$allCompanies = array();
+			if($queryEmployeeSizeResult->rowCount()>0){
+				$getCS = $queryEmployeeSizeResult->result();
+				while($c = $queryEmployeeSizeResult->fetch()){
+					array_push($allCompanies,$c->id);
+				}
+			}
+		}
+		if($cat!="" && $subCat!=""){
+			try{
+				$mainFilter = true;
+				$jsonCat = explode(',',$cat);	
+				$catImplode = str_repeat ('?, ',  count ($jsonCat) - 1) . '?';
+				$spQuery = "SELECT p.customer_id FROM preferences as p WHERE p.preference_id IN($catImplode)";
+				$catStmt = $this->db->prepare($spQuery);
+				$catStmt->execute($jsonCat);
+				if($catStmt->rowCount()>0){
+					$getLs = $spQuery->result();
+					$scList = array();
+					while($ls = $catStmt-fetch()){
+						array_push($scList,$ls->customer_id);
+					}
+					$jsonSubCat = explode(',',$subCat);
+					if(count($allCompanies)>0){
+						$scList = array_combine($scList,$allCompanies);
+						$scList = array_unique($scList);
+					}
+					$scListImplode = str_repeat ('?, ',  count ($scList) - 1) . '?';
+					$jsonSubCatImplode = str_repeat ('?, ',  count ($jsonSubCat) - 1) . '?';
+					$spQuery = "SELECT p.customer_id FROM preferences as p WHERE p.preference_id IN($jsonSubCatImplode) AND p.customer_id IN($scListImplode)";
+					$catStmt = $this->db->prepare($spQuery);
+					$catStmt->execute(array_merge($scList,$jsonSubCat));
+					if($catStmt->rowCount()>0){
+						$scList = array();
+						$allCompanies = array();
+						while($ls = $catStmt->fetch()){
+							array_push($allCompanies,$ls->customer_id);
+						}
+					} else {
+						$allCompanies = array();
+					}
+				}								
+			}catch(Exception $e){
+			}
+		} else if($cat!=""){
+			try{
+				$mainFilter = true;
+				$jsonCat = explode(',',$cat);				
+				$catImplode = str_repeat ('?, ',  count ($jsonCat) - 1) . '?';
+				$spQuery = "SELECT p.customer_id FROM preferences as p WHERE p.preference_id IN($catImplode)";
+				if(count($allCompanies)>0){
+					$allCompaniesImplode = str_repeat ('?, ',  count ($allCompanies) - 1) . '?';
+					$spQuery .= " AND p.customer_id IN($allCompaniesImplode)";
+				}
+				$catStmt = $this->db->prepare($spQuery);
+				if(count($allCompanies)>0){
+					$catStmt->execute(array_merge($jsonCat,$allCompanies));
+				} else {
+					$catStmt->execute($jsonCat);
+				}
+				if($catStmt->rowCount()>0){
+					$allCompanies = array();
+					while($ls = $catStmt->fetch()){
+						array_push($allCompanies,$ls->customer_id);
+					}
+				} else {
+					$allCompanies = array();
+				}			
+			}catch(Exception $e){
+			}
+		}
+		$checkU = false;
+		if($users!=""){
+			$mainFilter = true;
+			$explodeUsers = explode(',',$users);
+			$companyList = array();
+			$excludeCompanies = array();
+			foreach($explodeUsers as $u){
+				$queryString = "";
+				if((int)$u>0){
+					$queryString = "SELECT count(id) as countUsers,company_id FROM contacts ";
+					if(count($allCompanies)>0){
+						$allCompaniesImplode = str_repeat ('?, ',  count ($allCompanies) - 1) . '?';
+						$queryString .= " WHERE company_id IN($allCompaniesImplode) ";
+					}
+					$queryString .=" GROUP BY company_id ";
+					$queryString .=" HAVING countUsers =".$u;
+					$queryFindCompany = $this->db->prepare($queryString);
+					if(count($allCompanies)>0){
+						$queryFindCompany->execute($allCompanies);
+					} else {
+						$queryFindCompany->execute();
+					}
+					if($queryFindCompany->rowCount()>0){
+						$companies = array();
+						while($c = $queryFindCompany->fetch()){
+							array_push($companies,$c);
+						}
+						$companyList = array_merge($companyList,$companies);
+					}
+				} else if((int)$u==0){
+					if($checkU === false){
+						$checkU = true;
+					}
+				}					
+			}
+			if($checkU===true){
+				if(count($companyList)>0){
+					$aCompanies = array();
+					foreach($companyList as $company){
+						$aCompanies[] = $company->company_id;
+					}
+					$allCompanies = array_merge($allCompanies,$aCompanies);	
+					$allCompanies = array_unique($allCompanies);
+				} else {
+					$queryString = "SELECT count(id) as countUsers,company_id FROM contacts ";
+					if(count($allCompanies)>0){
+						$allCompaniesImplode = str_repeat ('?, ',  count ($allCompanies) - 1) . '?';
+						$queryString .= " WHERE company_id IN($allCompaniesImplode) ";
+					}
+					$queryString .=" GROUP BY company_id ";
+					$queryString .=" HAVING countUsers >0";
+					$queryFindCompany = $this->db->prepare($queryString);
+					if(count($allCompanies)>0){
+						$queryFindCompany->execute($allCompanies);
+					} else {
+						$queryFindCompany->execute();
+					}
+					if($queryFindCompany->rowCount()>0){
+						$exCompany = array();
+						while($c = $queryFindCompany->fetch()){
+							array_push($exCompany,$c->company_id);
+						}
+						if(count($allCompanies)>0){
+							$allCompanies  = array_diff($allCompanies,$exCompany);
+						} else {
+							$exCompanyImplode = str_repeat ('?, ',  count ($exCompany) - 1) . '?';
+							$queryC = "SELECT distinct(id) as company_id FROM company WHERE id NOT IN ($exCompanyImplode)";
+							$queryFindCompany = $this->db->prepare($queryC);
+							$queryFindCompany->execute($exCompany);
+							if($queryFindCompany->rowCount()>0){
+								$allCompanies = array();
+								while($company = $queryFindCompany->fetch()){
+									array_push($allCompanies,$company->company_id);
+								}
+							}
+						}
+					}
+				}
+			} else {
+				$allCompanies = array();
+				if(count($companyList)>0){
+					foreach($companyList as $company){
+						$allCompanies[] = $company->company_id;
+					}
+					$allCompanies = array_unique($allCompanies);
+				}
+			}
+		}
+		$checkEntry = true;
+		if($mainFilter===true && count($allCompanies)==0){
+			$checkEntry = false;
+		}
+		$category = array();
+		$subCategory = array();
+		$subTechnology = array();
+		if($checkEntry===true):
+			$querySELECT = "";
+			$queryJOIN = "";
+			$queryWHERE = array();
+			if($tech!="" && $subTech!=""){
+				try{
+					$jsonTech = explode(',',$tech);
+					$jsonSubTech = explode(',',$subTech);
+					$allTech = array_merge($jsonTech,$jsonSubTech);
+					if(count($allTech)>0){
+						$queryJOIN = " INNER JOIN technology_preference as t ON t.company_id = c.id ";
+						$queryWHERE[] = " t.preference_id IN (".implode(',',$allTech).") ";
+					}					
+				}catch(Exception $e){
+				}
+			} else if($tech!=""){
+				try{
+					$jsonTech = explode(',',$tech);
+					if(count($jsonTech)>0){
+						$queryJOIN = " INNER JOIN technology_preference as t ON t.company_id = c.id ";
+						$queryWHERE[] = " t.preference_id IN (".implode(',',$jsonCat).") ";
+					}					
+				}catch(Exception $e){
+				}
+			}
+			if(count($allCompanies)>0){
+				$allCompanies = array_unique($allCompanies);
+				$queryWHERE[] = " c.id IN (".implode(',',$allCompanies).") ";
+			}
+			if(!empty($sector)){
+				if($sector=='Unclassify'){
+					$queryWHERE[] = 'c.id NOT IN (SELECT company_id FROM company_sector as temp_c)';	
+				} else {
+					$queryJOIN = "INNER JOIN company_sector as cs ON c.id = cs.company_id ";
+					$queryWHERE[] = " cs.sector_id IN (".$sector.") ";
+				}
+			}
+			if(!empty($search)){							
+				$queryWHERE[] = 'c.company_name LIKE "%'.$search.'%"';
+			}
+			
+			$querySELECT = "SELECT count(c.id) as countRecords FROM company as c ";
+			if(count($queryWHERE)>0){
+				$queryWHERE = implode(' AND ',$queryWHERE);
+			} else {
+				$queryWHERE = "";
+			}
+			$buildQuery = $querySELECT." ".$queryJOIN." ";
+			if($queryWHERE!=""){
+				$buildQuery .=" WHERE ".$queryWHERE;
+			}			
+			$resultCount = $this->db->prepare($buildQuery);
+			$resultCount->execute();
+			if($resultCount->rowCount()){
+				$getCount = $resultCount->fetch();
+				$data['count_all'] = $getCount->countRecords;
+				$querySELECT = "SELECT distinct(c.id) as companyID, c.id, c.company_name,c.web_address, c.linkedin_url,c.scrapped_date,c.scrapped_profile_date,c.industry,c.no_of_employees,c.company_size,c.company_size_type,c.specialties,c.scrape_p, (SELECT count(*) as company_users FROM contacts WHERE company_id=c.id) as company_users,'' as sectorName, '' as department_names,'' as sub_department_names, '' as technology_names, '' as sub_technology_names , c.label, c.revenue FROM company as c ";
+				
+				$buildQuery = $querySELECT." ".$queryJOIN." ";
+				if($queryWHERE!=""){
+					$buildQuery .=" WHERE ".$queryWHERE;
+				}
+				$buildQuery .=" ORDER BY ".$sort." ".$orderBy;				
+				if($end>0){
+					$buildQuery .=" LIMIT ".$start.",".$end;
+				}			
+				$query = $this->db->prepare($buildQuery);
+				$query->execute();
+				$mapTech = array();
+				$mapCategpry = array();		
+				$mapSubCategory = array();
+				if ($query->rowCount() > 0) {
+					$companyDataResult = array();
+					while($r = $query->fetch()){
+						array_push($companyDataResult,$r);
+					}
+					if($rs === true){
+						$companyIDs = array();
+						$started = microtime(true);
+						for($i=0;$i<count($companyDataResult);$i++){
+							$companyIDs[] =  $companyDataResult[$i]->id;
+						}
+						$started = microtime(true);
+						$sectorsList = DataController::findAllCompanySectorsOptimized($companyIDs);
+						$sectorsCompanies = array();
+						if(count($sectorsList)>0){
+							foreach($sectorsList as $s){
+								$i=0;
+								foreach($companyDataResult as $co){
+									if($co->id == $s->company_id){
+										$sectorsCompanies[] = $s->company_id;
+										$sectorName = "";
+										if(isset($companyDataResult[$i]->sectorName)){
+											$sectorName = $companyDataResult[$i]->sectorName;
+										}
+										if($sectorName!=""){
+											$sectorName .=", ";
+										}
+										$sectorName .= $s->sectorName;
+										$companyDataResult[$i]->sectorName = $sectorName;
+										break;
+									}
+									$i++;
+								}						
+							}
+						}
+						if(count($sectorsCompanies)>0){
+							$sectorsCompanies = array_unique($sectorsCompanies);
+							/*Get Categories and Sub Categories*/
+							$getDepartmentsList = DataController::findAllCompanyPreferenceWithNameSub($sectorsCompanies,1);
+							if(count($getDepartmentsList)>0){
+								foreach($getDepartmentsList as $deptt){
+									$i=0;
+									foreach($companyDataResult as $co){
+										if($co->id == $deptt->customer_id){
+											if($deptt->parent==0){
+												$department_names = "";
+												if(isset($companyDataResult[$i]->department_names)){
+													$department_names = $companyDataResult[$i]->department_names;
+												}
+												if($department_names!=""){
+													$department_names .=", ";
+												}
+												$department_names .= $deptt->name;
+												$companyDataResult[$i]->department_names = $department_names;
+												if(!in_array($deptt->id,$mapCategpry)){
+													$mapCategpry[] = $deptt->id;
+													$category[] = array('id'=>$deptt->id,'name'=>$deptt->name);
+												}
+											} else {
+												$sub_department_names = "";
+												if(isset($companyDataResult[$i]->sub_department_names)){
+													$sub_department_names = $companyDataResult[$i]->sub_department_names;
+												}
+												if($sub_department_names!=""){
+													$sub_department_names .=", ";
+												}
+												$sub_department_names .= $deptt->name;
+												$companyDataResult[$i]->sub_department_names = $sub_department_names;
+												if(!in_array($deptt->id,$mapSubCategory)){
+													$mapSubCategory[] = $deptt->id;
+													$subCategory[] = array('id'=>$deptt->id,'name'=>$deptt->name);
+												}
+											}
+											break;
+										}
+										$i++;
+									}
+									
+								}						
+							}
+						}
+						$technologies = DataController::findAllCompaniesTechnologiesPreferenceWithNameSub($companyIDs,0);
+						if(count($technologies)>0){
+							$techCompanyIDs = array();
+							foreach($technologies as $tech){
+								$i=0;
+								foreach($companyDataResult as $co){
+									if($co->id == $tech->company_id){
+										$techCompanyIDs[]=$tech->company_id;
+										$technologyNames = "";
+										if(isset($companyDataResult[$i]->technology_names)){
+											$technologyNames = $companyDataResult[$i]->technology_names;
+										}
+										if($technologyNames!=""){
+											$technologyNames .=", ";
+										}
+										$technologyNames .= $tech->name;
+										$companyDataResult[$i]->technology_names = $technologyNames;
+									}
+									$i++;
+								}
+							}
+							$techCompanyIDs = array_unique($techCompanyIDs);
+							$subTechnologies = DataController::findAllCompaniesTechnologiesPreferenceWithNameSub($techCompanyIDs,1);
+							if(count($subTechnologies)>0){
+								$subTechCompanyIDs = array();
+								foreach($subTechnologies as $tech){
+									$i=0;
+									foreach($companyDataResult as $co){
+										if($co->id == $tech->company_id){
+											$subTechCompanyIDs[]=$tech->company_id;
+											$technologyNames = "";
+											if(isset($companyDataResult[$i]->sub_technology_names)){
+												$technologyNames = $companyDataResult[$i]->sub_technology_names;
+											}
+											if($technologyNames!=""){
+												$technologyNames .=", ";
+											}									
+											if(!in_array($tech->id,$mapTech)){
+												$mapTech[] = $tech->id;
+												$subTechnology[] = array('id'=>$tech->id,'name'=>$tech->name);
+												$technologyNames .= $tech->name;
+												$companyDataResult[$i]->sub_technology_names = $technologyNames;
+											}
+										}
+										$i++;
+									}
+								}
+								$subTechCompanyIDs = array_unique($subTechCompanyIDs);
+								$subsubTechnologies = DataController::findAllCompaniesTechnologiesPreferenceWithNameSub($subTechCompanyIDs,2);
+								if(count($subsubTechnologies)>0){
+									foreach($subsubTechnologies as $tech){
+										$i=0;
+										foreach($companyDataResult as $co){
+											if($co->id == $tech->company_id){
+												$technologyNames = "";
+												if(isset($companyDataResult[$i]->sub_technology_names)){
+													$technologyNames = $companyDataResult[$i]->sub_technology_names;
+												}
+												if($technologyNames!=""){
+													$technologyNames .=", ";
+												}										
+												if(!in_array($tech->id,$mapTech)){
+													$mapTech[] = $tech->id;
+													$subTechnology[] = array('id'=>$tech->id,'name'=>$tech->name);
+													$technologyNames .= $tech->name;
+													$companyDataResult[$i]->sub_technology_names = $technologyNames;
+												}
+											}
+											$i++;
+										}
+									}
+								}
+							}					
+						}						
+					}
+					$data['data'] = $companyDataResult;
+				}
+			}			
+		endif;
+		$data['cat'] = $category;
+		$data['sub_cat'] = $subCategory;
+		$data['sub_tech'] = $subTechnology;
+		return $data; 
+	}
+	
+	private function findAllCompanySectorsOptimized($companyIDs){
+		$data = array();
+		if(count($companyIDs)>0){
+			$companyImplode = str_repeat ('?, ',  count ($companyIDs) - 1) . '?';
+			$queryS = "SELECT s.name as sectorName, s.id as sectorID, cs.company_id FROM company_sector as cs LEFT JOIN sectors as s ON s.id = cs.sector_id WHERE cs.company_id IN ($companyImplode)";
+			$sectorStmt = $this->db->prepare($queryS);
+			$sectorStmt->execute($companyIDs);
+			$data = array();
+			if ($sectorStmt->rowCount() > 0) {
+				while($s = $sectorStmt->fetch()){
+					array_push($data,$s);
+				}
+			}
+		}
+		return $data;
+	}
+	
+	private function findAllCompanyPreferenceWithNameSub($companyIDs,$type){
+		$companyImplode = str_repeat ('?, ',  count ($companyIDs) - 1) . '?';
+		$queryS = "SELECT c.*,p.customer_id FROM technology_preference as p INNER JOIN category as c ON c.id = p.preference_id WHERE p.customer_id IN ($companyImplode) AND c.type=?";
+		$technologyStmt = $this->db->prepare($queryS);
+		$technologyStmt->execute(array_merge($companyIDs,array($type)));
+		$data = array();
+		if ($technologyStmt->rowCount() > 0) {
+            while($r = $technologyStmt->fetch()){
+				array_push($data,$r);
+			}
+        }
+		return $data;
+	}
+	
+	private function findAllCompaniesTechnologiesPreferenceWithNameSub($companyIDs,$type){
+		$companyImplode = str_repeat ('?, ',  count ($companyIDs) - 1) . '?';
+		$queryS = "SELECT c.*,p.company_id FROM technology_preference as p INNER JOIN category as c ON c.id = p.preference_id WHERE p.company_id IN ($companyImplode) AND c.type=?";
+		$technologyStmt = $this->db->prepare($queryS);
+		$technologyStmt->execute(array_merge($companyIDs,array($type)));
+		$data = array();
+		if ($technologyStmt->rowCount() > 0) {
+            while($r = $technologyStmt->fetch()){
+				array_push($data,$r);
+			}
+        }
+		return $data; 
+	}
+	
+	private function checkToken($auth){
+		$validate = false;
+		try{
+			if($auth!=""){
+				$checkAuth = "SELECT count(*) as countR FROM docket_tokens WHERE token=? AND date_expiration>=? ORDER BY id DESC LIMIT 1";
+				$authStmt = $this->db->prepare($checkAuth);
+				$condition = array($auth,strtotime('now'));
+				$authStmt->execute($condition);
+				if($authStmt->rowCount()>0){
+					$getAuth = $authStmt->fetch();
+					if($getAuth->countR==1){
+						$validate = true;
+					}
+				}
+			}
+		}catch(Exception $e){
+		}
+		return $validate;
+	}
+	
+	private function getPatentList($leadID){
+		$list = array();
+		$queryPatents = "SELECT id,patent_number from lead_patent WHERE lead_id=?";
+		$patentsStmt = $this->db->prepare($queryPatents);
+		$patentsStmt->execute([$leadID]);
+		if($patentsStmt->rowCount()>0){
+			while($row = $patentsStmt->fetch()){
+				array_push($list,$row);
+			}
+		}
+		return $list;
+	}
+	
+	private function getLeadID($docketNumber){
+		$ID = 0;
+		$queryLead = "SELECT id from litigations WHERE serial_number=?";
+		$leadStmt = $this->db->prepare($queryLead);
+		$leadStmt->execute([$docketNumber]);
+		if($leadStmt->rowCount()>0){
+			$leadData = $leadStmt->fetch();
+			$ID = $leadData->id;
+		}
+		return $ID;
+	}
+	
+	private function getDocketID($docketNumber){
+		$ID = 0;
+		$queryDocket = "SELECT id from licenses WHERE serial_number=?";
+		$docketStmt = $this->db->prepare($queryDocket);
+		$docketStmt->execute([$docketNumber]);
+		if($docketStmt->rowCount()>0){
+			$docketData = $docketStmt->fetch();
+			$ID = $docketData->id;
+		}
+		return $ID;
+	}
+	/*clean string with semicolon,colon,html tags*/
+	private function cleanString($string){
+		$string = trim($string);
+		$string = strip_tags($string);
+		$string = preg_replace("/;/", "",$string);
+		$string = preg_replace("/'/", "",$string);
+		$string = preg_replace("/\"/", "",$string);
+		$regex = '/(\s|\\\\[rntv]{1})/';
+		$string = preg_replace($regex, ' ', $string);
+		return $string;
+	}
+	/*clean string with semicolon,colon*/
+	private function cleanStringWithoutStripTag($string){
+		$string = trim($string);
+		$string = preg_replace("/'/", "",$string);
+		$regex = '/(\s|\\\\[rntv]{1})/';
+		$string = preg_replace($regex, ' ', $string);
+		return $string;
+	}
+	
+	/*Multi sort array*/
+	private function sort_array_of_array(&$array, $subfield){
+		$sortarray = array();
+		foreach ($array as $key => $row){
+			$sortarray[$key] = $row[$subfield];
+		}
+		array_multisort($sortarray, SORT_ASC, $array);
+	}
+	
+	/*Single company data*/
+	private function companyData($companyID){
+		$getDataAppC = array();
+		$queryParent = "SELECT company_name,company_logo,linkedin_url,parent_c FROM company WHERE id=?";
+		$parentStmt = $this->db->prepare($queryParent);
+		$parentStmt->execute([$companyID]);
+		if($parentStmt->rowCount()>0){
+			$getDataAppC = $parentStmt->fetch();
+		}
+		return $getDataAppC;
+	}
+	/*Find company logos*/
+	private function findCompanyLogo($companyName,$applicantList,$mode = 1){
+		$getDataAppC = array();
+		$dataReturn = array('img'=>'','applicant'=>'','applicantList'=>$applicantList,'company_logo'=>'','count'=>0);
+		switch($mode){
+			case 1:
+				$applicantC = "SELECT company_name,company_logo ,linkedin_url,parent_c FROM company WHERE (company_name = ? OR other1 = ?  OR other2 = ?  OR other3 = ?  OR other4 = ?  OR other5 = ?) AND  (company_logo <>'' OR parent_c>0) ORDER BY company_name ASC LIMIT 1";
+				$applicantStmt = $this->db->prepare($applicantC);
+				$companyName = str_replace(',','',htmlspecialchars_decode(trim($companyName), ENT_NOQUOTES)); 
+				$applicantStmt->execute([$companyName,$companyName,$companyName,$companyName,$companyName,$companyName]);
+				$img = "";$nameApplicant="";
+				$countRows = $applicantStmt->rowCount();
+				if($countRows>0){
+					$getDataAppC = $applicantStmt->fetch();
+					if($getDataAppC->parent_c>0){
+						$getDataAppC = DataController::companyData($getDataAppC->parent_c);			
+					}
+					if(isset($getDataAppC->company_logo) && $getDataAppC->company_logo!="" && strpos($getDataAppC->company_logo,"http")!==false){
+						$dataReturn['count'] = $countRows;
+						$dataReturn['applicantList'][]= (object)array('img'=>$getDataAppC->company_logo,'applicant'=>$companyName,'company_name'=>$getDataAppC->company_name);
+						$dataReturn['applicant']=$getDataAppC->company_name;
+						$dataReturn['img'] = $getDataAppC->company_logo;
+						$dataReturn['company_logo'] = $getDataAppC->company_logo;
+					}
+				} 
+			break;
+			case 2:
+				$nameC = explode(" ",$companyName);
+				if(count($nameC)>2){
+					$searchWord = $nameC[0]." ".$nameC[1]." ".trim($nameC[2]);
+					$searchWord = htmlspecialchars_decode(trim($searchWord), ENT_NOQUOTES);
+					$searchWord = str_replace(",","",$searchWord);
+					$searchWord = '"'.$searchWord.'"';
+					$applicantC = "SELECT company_name,company_logo ,linkedin_url,parent_c FROM company WHERE MATCH (company_name,other1,other2,other3,other4,other5) AGAINST (? IN BOOLEAN MODE)  AND  (company_logo <>'' OR parent_c>0)  ORDER BY company_name ASC LIMIT 1";
+					$applicantStmt = $this->db->prepare($applicantC);
+					$applicantStmt->execute([$searchWord]);
+					$countRows = $applicantStmt->rowCount();
+					if($countRows>0){
+						$searchWord = substr($searchWord,1,-1);
+						$getDataAppC = $applicantStmt->fetch();
+						if($getDataAppC->parent_c>0){
+							$getDataAppC = DataController::companyData($getDataAppC->parent_c);						
+						}					
+						if(isset($getDataAppC->company_logo) && $getDataAppC->company_logo!="" && strpos($getDataAppC->company_logo,"http")!==false){
+							$dataReturn['applicantList'][]= (object)array('img'=>$getDataAppC->company_logo,'applicant'=>$searchWord,'company_name'=>$getDataAppC->company_name);
+							$dataReturn['count'] = $countRows;
+							$dataReturn['applicant']=$getDataAppC->company_name;
+							$dataReturn['img'] = $getDataAppC->company_logo;
+							$dataReturn['company_logo'] = $getDataAppC->company_logo;
+						}
+					}
+				}
+			break;
+			case 3:
+				$nameC = explode(" ",$companyName);
+				if(count($nameC)>1){
+					$searchWord = $nameC[0]." ".trim($nameC[1]);
+					$searchWord = htmlspecialchars_decode(trim($searchWord), ENT_NOQUOTES);
+					$searchWord = str_replace(",","",$searchWord);
+					$searchWord = '"'.$searchWord.'"';
+					$applicantC = "SELECT company_name,company_logo ,linkedin_url,parent_c FROM company WHERE MATCH (company_name,other1,other2,other3,other4,other5) AGAINST (? IN BOOLEAN MODE)  AND  (company_logo <>'' OR parent_c>0)  ORDER BY company_name ASC LIMIT 1";
+					$applicantStmt = $this->db->prepare($applicantC);
+					$applicantStmt->execute([$searchWord]);
+					$countRows = $applicantStmt->rowCount();
+					if($countRows>0){
+						$searchWord = substr($searchWord,1,-1);
+						$getDataAppC = $applicantStmt->fetch();
+						if($getDataAppC->parent_c>0){
+							$getDataAppC = DataController::companyData($getDataAppC->parent_c);						
+						}	
+						if(isset($getDataAppC->company_logo) && $getDataAppC->company_logo!="" && strpos($getDataAppC->company_logo,"http")!==false){
+							$dataReturn['applicantList'][]= (object)array('img'=>$getDataAppC->company_logo,'applicant'=>$searchWord,'company_name'=>$getDataAppC->company_name);
+							$dataReturn['count'] = $countRows;
+							$dataReturn['applicant']=$getDataAppC->company_name;
+							$dataReturn['img'] = $getDataAppC->company_logo;
+							$dataReturn['company_logo'] = $getDataAppC->company_logo;
+						}
+					}
+				}
+			break;
+			case 4:
+				$nameC = explode(" ",$companyName);
+				if(count($nameC)>0){
+					$searchWord = $nameC[0];
+					$searchWord = htmlspecialchars_decode(trim($searchWord), ENT_NOQUOTES);
+					$searchWord = str_replace(",","",$searchWord);
+					$searchWord = '"'.$searchWord.'"';
+					$applicantC = "SELECT company_name,company_logo ,linkedin_url,parent_c FROM company WHERE MATCH (company_name,other1,other2,other3,other4,other5) AGAINST (? IN BOOLEAN MODE)  AND (company_logo <>'' OR parent_c>0)	ORDER BY company_name ASC LIMIT 1";
+					$applicantStmt = $this->db->prepare($applicantC);
+					$applicantStmt->execute([$searchWord]);
+					$countRows = $applicantStmt->rowCount();
+					if($countRows>0){
+						$searchWord = substr($searchWord,1,-1);
+						$getDataAppC = $applicantStmt->fetch();
+						if($getDataAppC->parent_c>0){
+							$getDataAppC = DataController::companyData($getDataAppC->parent_c);						
+						}	
+						if(isset($getDataAppC->company_logo) && $getDataAppC->company_logo!="" && strpos($getDataAppC->company_logo,"http")!==false){
+							$dataReturn['applicantList'][]= (object)array('img'=>$getDataAppC->company_logo,'applicant'=>$searchWord,'company_name'=>$getDataAppC->company_name);
+							$dataReturn['count'] = $countRows;
+							$dataReturn['applicant']=$getDataAppC->company_name;
+							$dataReturn['img'] = $getDataAppC->company_logo;
+							$dataReturn['company_logo'] = $getDataAppC->company_logo;
+						}
+					}
+				} 
+			break;
+		}
+		return $dataReturn;
+	}
+}
